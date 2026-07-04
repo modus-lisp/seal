@@ -12,5 +12,5 @@
 (asdf:load-system :seal/test)
 
 (in-package #:seal)
-(let ((failures (+ (run-vectors) (run-live))))
+(let ((failures (+ (run-vectors) (run-negative-tests) (run-live))))
   (sb-ext:exit :code (if (zerop failures) 0 1)))

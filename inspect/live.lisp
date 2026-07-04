@@ -17,18 +17,29 @@
              (eol (or (position #\return text) (position #\newline text) (length text))))
         (subseq text 0 eol)))))
 
-(defun run-live (&key (hosts *live-hosts*) (verify :hostname))
-  "Handshake + GET against each host. Returns the number of failures."
+(defun leaf-sig-summary (conn)
+  "Describe the leaf certificate's signature algorithm (proves which family the
+chain validation exercised)."
+  (let ((leaf (first (tls-connection-peer-certificates conn))))
+    (if leaf
+        (format nil "~a/~a" (certificate-sig-scheme leaf) (certificate-sig-hash leaf))
+        "?")))
+
+(defun run-live (&key (hosts *live-hosts*) (verify t))
+  "Full-validation (:verify T by default) handshake + GET against each host.
+Returns the number of failures. Reports each leaf's signature algorithm so it is
+clear that both RSA and ECDSA chains were validated."
   (let ((failures 0))
-    (format t "~%== Live TLS 1.3 handshake + GET ==~%")
+    (format t "~%== Live TLS 1.3 + FULL certificate validation (:verify t) ==~%")
     (dolist (host hosts)
       (handler-case
           (let ((conn (connect host 443 :verify verify)))
             (unwind-protect
                  (let ((status (http-get-status conn host)))
                    (if (and status (search "HTTP/1.1" status))
-                       (format t "  OK   ~22a ~28a ~a~%"
-                               host (tls-connection-cipher conn) status)
+                       (format t "  OK   ~22a ~24a sig=~18a ~a~%"
+                               host (tls-connection-cipher conn)
+                               (leaf-sig-summary conn) status)
                        (progn (incf failures)
                               (format t "  FAIL ~22a no status line~%" host))))
               (tls-close conn)))

@@ -13,13 +13,14 @@
   "Run the crypto vectors and a single live handshake. Signals an error on any
 failure so ASDF:TEST-SYSTEM reports it."
   (let ((crypto-failures (run-vectors))
+        (negative-failures (run-negative-tests))
         (live-failures
           (handler-case (run-live :hosts '("example.com"))
             (error (e)
               (format t "~%live fetch errored: ~a~%" e)
               1))))
-    (format t "~%======== self-test: ~d crypto failure(s), ~d live failure(s) ========~%"
-            crypto-failures live-failures)
-    (when (plusp (+ crypto-failures live-failures))
+    (format t "~%======== self-test: ~d crypto, ~d negative, ~d live failure(s) ========~%"
+            crypto-failures negative-failures live-failures)
+    (when (plusp (+ crypto-failures negative-failures live-failures))
       (error "seal self-test failed"))
     t))

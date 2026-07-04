@@ -78,6 +78,8 @@
   (recv-buffer #())
   early-data
   (peer-certificates nil)
+  (verify nil)
+  (cert-verify-ok :not-checked)
   alpn)
 
 (defun tls-connection-cipher-name (conn)
@@ -410,6 +412,53 @@
         (incf pos (+ 3 cert-len 2 ext-len))))
     (setf (tls-peer-certificates conn) (nreverse certs))))
 
+;;; ---- CertificateVerify (RFC 8446 §4.4.3) ----------------------------------
+
+(defun tls-signature-scheme (code)
+  "Map a TLS 1.3 SignatureScheme code to (values scheme hash salt).
+Returns NIL for schemes seal cannot verify (so they fail closed)."
+  (case code
+    (#x0401 (values :rsa-pkcs1 :sha256 nil))
+    (#x0501 (values :rsa-pkcs1 :sha384 nil))
+    (#x0601 (values :rsa-pkcs1 :sha512 nil))
+    (#x0403 (values :ecdsa :sha256 nil))         ; ecdsa_secp256r1_sha256
+    (#x0503 (values :ecdsa :sha384 nil))         ; ecdsa_secp384r1_sha384
+    (#x0804 (values :rsa-pss :sha256 nil))       ; rsa_pss_rsae_sha256
+    (#x0805 (values :rsa-pss :sha384 nil))
+    (#x0806 (values :rsa-pss :sha512 nil))
+    (#x0809 (values :rsa-pss :sha256 nil))       ; rsa_pss_pss_sha256
+    (#x080a (values :rsa-pss :sha384 nil))
+    (#x080b (values :rsa-pss :sha512 nil))
+    (#x0807 (values :ed25519 nil nil))
+    (t (values nil nil nil))))
+
+(defparameter +certificate-verify-context+
+  (concatenate '(vector (unsigned-byte 8))
+               (make-array 64 :element-type '(unsigned-byte 8) :initial-element #x20)
+               (map 'vector #'char-code "TLS 1.3, server CertificateVerify")
+               #(0)))
+
+(defun verify-certificate-verify (conn hs-msg)
+  "Verify the server's CertificateVerify signature over the handshake transcript
+with the leaf certificate's public key. Raises on failure."
+  (let* ((code (bytes-u16 hs-msg 4))
+         (sig-len (bytes-u16 hs-msg 6))
+         (signature (subseq hs-msg 8 (+ 8 sig-len)))
+         ;; transcript hash covers ClientHello .. Certificate (this message is
+         ;; not yet in the transcript).
+         (th (transcript-hash conn))
+         (signed (concatenate '(vector (unsigned-byte 8))
+                              +certificate-verify-context+ th))
+         (leaf (first (tls-peer-certificates conn))))
+    (multiple-value-bind (scheme hash salt) (tls-signature-scheme code)
+      (unless (and scheme leaf (certificate-spki leaf))
+        (error 'tls-certificate-bad-signature-error
+               :message (format nil "unsupported CertificateVerify scheme 0x~4,'0x" code)))
+      (unless (verify-signature (certificate-spki leaf) scheme hash salt signed signature)
+        (error 'tls-certificate-bad-signature-error
+               :message "CertificateVerify signature did not verify"))
+      (setf (tls-cert-verify-ok conn) t))))
+
 ;;; ---- the handshake ---------------------------------------------------------
 
 (defun process-encrypted-handshake (conn plaintext)
@@ -430,6 +479,11 @@
              (parse-certificate-message conn hs-msg)
              (add-to-transcript conn hs-msg))
             ((= hs-type +hs-certificate-verify+)
+             ;; Proof of possession: verify before folding it into the
+             ;; transcript (the signature covers CH..Certificate). Only when the
+             ;; caller asked for authentication.
+             (when (tls-verify conn)
+               (verify-certificate-verify conn hs-msg))
              (add-to-transcript conn hs-msg))
             ((= hs-type +hs-finished+)
              ;; verify server Finished before adding it to the transcript
@@ -590,16 +644,29 @@ end of stream."
 
 ;;; ---- verification ----------------------------------------------------------
 
-(defun run-verification (conn verify host)
+(defun run-verification (conn verify host trust-store)
   "Apply the VERIFY policy against CONN's peer certificates.
-VERIFY may be NIL (no check), :hostname (leaf-cert name match, no chain
-validation), or a function of (certificates host) returning generalized-boolean."
+VERIFY may be:
+  T          full validation: chain to a trusted CA + validity dates + hostname
+             + the CertificateVerify signature (the secure default);
+  :hostname  leaf-cert name match only, plus CertificateVerify (no chain);
+  NIL        no authentication whatsoever (see the README);
+  a function of (certificates host) returning a generalized boolean."
   (let ((certs (tls-peer-certificates conn)))
     (cond
       ((null verify) t)
+      ((eq verify t)
+       (unless certs
+         (error 'tls-certificate-error :message "server presented no certificates"))
+       ;; CertificateVerify was checked during the handshake; make sure of it.
+       (unless (eq (tls-cert-verify-ok conn) t)
+         (error 'tls-certificate-bad-signature-error
+                :message "CertificateVerify was not established"))
+       (validate-chain certs (resolve-trust-store trust-store) host)
+       t)
       ((eq verify :hostname)
        (unless (and certs (certificate-matches-host-p (first certs) host))
-         (error 'tls-verify-error
+         (error 'tls-certificate-hostname-error
                 :message (format nil "no certificate name matches ~a" host)))
        t)
       ((functionp verify)
@@ -610,26 +677,34 @@ validation), or a function of (certificates host) returning generalized-boolean.
 
 ;;; ---- public entry point ----------------------------------------------------
 
-(defun connect (host port &key (verify nil) (timeout 30) transport
+(defun connect (host port &key (verify t) (timeout 30) transport
+                              (trust-store :system)
                               (alpn '("http/1.1")) early-data)
   "Open a TLS 1.3 connection to HOST:PORT and complete the handshake.
 
-  :verify     NIL (default; no authentication — see the README), :hostname, or a
-              function (certificates host) -> generalized-boolean.
-  :timeout    per-receive socket timeout, seconds.
-  :transport  a pre-built TRANSPORT; if NIL, a TCP transport is opened to HOST:PORT.
-  :alpn       list of ALPN protocol names to advertise (NIL to omit).
-  :early-data optional application bytes sent alongside the client Finished.
+  :verify      authentication policy, T by default (the secure default for real
+               use): build and verify the certificate chain to a trusted CA,
+               check validity dates and hostname, and verify the server's
+               CertificateVerify signature. Other values: :hostname (name match
+               only), NIL (no authentication — see the README), or a function
+               (certificates host) -> generalized-boolean.
+  :trust-store with :verify T, the CA trust anchors: a TRUST-STORE, :system
+               (default; the OS CA bundle), or a pathname/string to a PEM file.
+  :timeout     per-receive socket timeout, seconds.
+  :transport   a pre-built TRANSPORT; if NIL, a TCP transport is opened to HOST:PORT.
+  :alpn        list of ALPN protocol names to advertise (NIL to omit).
+  :early-data  optional application bytes sent alongside the client Finished.
 
-Returns a TLS-CONNECTION, or signals a TLS-ERROR / TLS-VERIFY-ERROR."
+Returns a TLS-CONNECTION, or signals a TLS-ERROR / TLS-CERTIFICATE-ERROR."
   (let* ((tp (or transport (make-socket-transport host port :timeout timeout)))
          (conn (make-tls-connection :transport tp
                                     :host (and (stringp host) host)
+                                    :verify verify
                                     :early-data early-data)))
     (handler-case
         (progn
           (handshake conn (and (stringp host) host) alpn)
-          (run-verification conn verify host)
+          (run-verification conn verify host trust-store)
           conn)
       (error (e)
         (ignore-errors (transport-close tp))

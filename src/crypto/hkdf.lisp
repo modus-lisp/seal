@@ -6,7 +6,7 @@
 ;;; The public entry points default to SHA-256, matching the RFC 5869 vectors.
 
 (defun hash-length (which)
-  (ecase which (:sha256 32) (:sha384 48)))
+  (ecase which (:sha256 32) (:sha384 48) (:sha512 64)))
 
 (defun hmac-hash (which key message)
   (ecase which
@@ -16,7 +16,8 @@
 (defun digest-hash (which message)
   (ecase which
     (:sha256 (sha256 message))
-    (:sha384 (sha384 message))))
+    (:sha384 (sha384 message))
+    (:sha512 (sha512 message))))
 
 (defun hkdf-extract (salt ikm &optional (which :sha256))
   "HKDF-Extract(salt, IKM) -> PRK."

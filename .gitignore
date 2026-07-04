@@ -1,0 +1,4 @@
+*.fasl
+*.o
+*.log
+/inspect/*.out

@@ -543,6 +543,10 @@ with the leaf certificate's public key. Raises on failure."
     ;; 4. encrypted handshake flight
     (let ((finished nil))
       (loop
+        ;; Once the server Finished is processed the handshake is complete; any
+        ;; further records already buffered are app-keyed (a pipelined
+        ;; NewSessionTicket) and must not be decrypted with the handshake key.
+        (when finished (return))
         (multiple-value-bind (record remaining) (extract-record recv-buffer)
           (unless record
             (when finished (return))
@@ -565,7 +569,11 @@ with the leaf certificate's public key. Raises on failure."
                      (setf finished t))))
                 (t (error 'tls-error :message
                           (format nil "unexpected record type ~d in handshake" rtype))))))))
-      (unless finished (error 'tls-error :message "server Finished not received")))
+      (unless finished (error 'tls-error :message "server Finished not received"))
+      ;; Preserve any records the server pipelined after Finished (a NewSessionTicket,
+      ;; already app-keyed) so tls-recv processes them with the app key and the server
+      ;; sequence stays in sync with the response that follows.
+      (setf (tls-recv-buffer conn) recv-buffer))
     ;; 5. client Finished (+ CCS for middlebox compatibility) then app keys
     (let* ((th (transcript-hash conn))
            (verify (finished-verify-data conn (tls-client-hs-secret conn)))

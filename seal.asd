@@ -37,6 +37,7 @@ only platform dependency is SBCL's own sb-bsd-sockets."
      (:file "verify")
      (:file "transport")
      (:file "tls13")
+     (:file "tls12")
      (:file "stream"))))
   :in-order-to ((asdf:test-op (asdf:test-op :seal/test))))
 

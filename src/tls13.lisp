@@ -18,7 +18,11 @@
 (defconstant +hs-new-session-ticket+ 4)
 (defconstant +hs-encrypted-extensions+ 8)
 (defconstant +hs-certificate+ 11)
+(defconstant +hs-server-key-exchange+ 12)
+(defconstant +hs-certificate-request+ 13)
+(defconstant +hs-server-hello-done+ 14)
 (defconstant +hs-certificate-verify+ 15)
+(defconstant +hs-client-key-exchange+ 16)
 (defconstant +hs-finished+ 20)
 
 (defconstant +ext-server-name+ 0)
@@ -36,6 +40,12 @@
 (defconstant +cs-aes-128-gcm-sha256+ #x1301)
 (defconstant +cs-aes-256-gcm-sha384+ #x1302)
 (defconstant +cs-chacha20-poly1305-sha256+ #x1303)
+
+;; TLS 1.2 ECDHE suites (RFC 5289 / RFC 7905). AEAD only, no CBC.
+(defconstant +cs-ecdhe-rsa-aes128-gcm-sha256+ #xC02F)
+(defconstant +cs-ecdhe-ecdsa-aes128-gcm-sha256+ #xC02B)
+(defconstant +cs-ecdhe-rsa-chacha20-poly1305-sha256+ #xCCA8)
+(defconstant +cs-ecdhe-ecdsa-chacha20-poly1305-sha256+ #xCCA9)
 
 (defconstant +group-x25519+ 29)
 (defconstant +version-12+ #x0303)
@@ -80,7 +90,12 @@
   (peer-certificates nil)
   (verify nil)
   (cert-verify-ok :not-checked)
-  alpn)
+  alpn
+  ;; negotiated protocol version (+version-13+ or +version-12+) and, for TLS 1.2,
+  ;; the record-layer keys/fixed-IVs derived from the key_block.
+  version
+  (t12-ems nil)
+  t12-client-key t12-server-key t12-client-iv t12-server-iv)
 
 (defun tls-connection-cipher-name (conn)
   (let ((c (tls-cipher conn)))
@@ -143,10 +158,16 @@
 ;;; ---- ClientHello extensions ------------------------------------------------
 
 (defun ext-supported-versions ()
-  (build-extension +ext-supported-versions+ (bv 2 #x03 #x04)))
+  ;; Advertise both TLS 1.3 and TLS 1.2, most-preferred first.
+  (build-extension +ext-supported-versions+ (bv 4 #x03 #x04 #x03 #x03)))
 
 (defun ext-supported-groups ()
-  (build-extension +ext-supported-groups+ (bv 0 2 0 29)))   ; x25519 only
+  ;; x25519 (preferred) plus secp256r1/secp384r1. The NIST curves are advertised
+  ;; so that TLS 1.2 servers with an ECDSA-on-P-256/384 certificate accept the
+  ;; handshake (the elliptic_curves extension also constrains the cert curve);
+  ;; the ECDHE key exchange itself still runs over x25519, for which we send the
+  ;; sole key_share.
+  (build-extension +ext-supported-groups+ (bv 0 6 0 #x1d 0 #x17 0 #x18)))
 
 (defun ext-signature-algorithms ()
   (build-extension +ext-signature-algorithms+
@@ -216,16 +237,18 @@
                           (ext-key-share public-key)))
            (ext-len (length extensions))
            (session-id (secure-random-bytes 32))
-           (body (make-array (+ 2 32 1 32 2 6 2 2 ext-len)
+           (body (make-array (+ 2 32 1 32 2 14 2 2 ext-len)
                              :element-type '(unsigned-byte 8)))
            (pos 0))
       (flet ((put (b) (setf (aref body pos) b) (incf pos)))
         (put #x03) (put #x03)                     ; legacy_version TLS 1.2
         (dotimes (i 32) (put (aref client-random i)))
         (put 32) (dotimes (i 32) (put (aref session-id i)))
-        ;; cipher_suites (3 suites)
-        (put 0) (put 6)
+        ;; cipher_suites: TLS 1.3 AEAD suites, then TLS 1.2 ECDHE AEAD suites
+        (put 0) (put 14)
         (put #x13) (put #x01) (put #x13) (put #x02) (put #x13) (put #x03)
+        (put #xcc) (put #xa8) (put #xcc) (put #xa9)
+        (put #xc0) (put #x2b) (put #xc0) (put #x2f)
         ;; compression: null only
         (put 1) (put 0)
         ;; extensions
@@ -244,11 +267,17 @@
     (incf pos (1+ (aref data pos)))               ; skip session id echo
     (let ((cipher (bytes-u16 data pos)))
       (unless (member cipher (list +cs-aes-128-gcm-sha256+ +cs-aes-256-gcm-sha384+
-                                   +cs-chacha20-poly1305-sha256+))
+                                   +cs-chacha20-poly1305-sha256+
+                                   +cs-ecdhe-rsa-aes128-gcm-sha256+
+                                   +cs-ecdhe-ecdsa-aes128-gcm-sha256+
+                                   +cs-ecdhe-rsa-chacha20-poly1305-sha256+
+                                   +cs-ecdhe-ecdsa-chacha20-poly1305-sha256+))
         (error 'tls-error :message (format nil "unsupported cipher suite 0x~4,'0x" cipher)))
       (setf (tls-cipher conn) cipher)
       (incf pos 2))
     (incf pos)                                     ; compression method (0)
+    ;; Absent a supported_versions extension the server has chosen TLS 1.2.
+    (setf (tls-version conn) +version-12+)
     (when (>= (length data) (+ pos 2))
       (let* ((ext-len (bytes-u16 data pos))
              (ext-end (+ pos 2 ext-len)))
@@ -264,11 +293,13 @@
                  (when (and (= group +group-x25519+) (= key-len 32))
                    (setf (tls-server-public-key conn) (subseq data (+ pos 4) (+ pos 4 32))))))
               ((= ext-type +ext-supported-versions+)
-               (unless (= (bytes-u16 data pos) +version-13+)
-                 (error 'tls-error :message "server did not select TLS 1.3"))))
+               (setf (tls-version conn) (bytes-u16 data pos)))
+              ((= ext-type +ext-extended-master-secret+)
+               (setf (tls-t12-ems conn) t)))
             (incf pos ext-data-len)))))
-    (unless (tls-server-public-key conn)
-      (error 'tls-error :message "ServerHello without an x25519 key_share"))
+    (when (= (tls-version conn) +version-13+)
+      (unless (tls-server-public-key conn)
+        (error 'tls-error :message "ServerHello without an x25519 key_share")))
     t))
 
 ;;; ---- key schedule ----------------------------------------------------------
@@ -538,56 +569,66 @@ with the leaf certificate's public key. Raises on failure."
           (let ((msg-len (bytes-u24 hs 1)))
             (parse-server-hello conn (subseq hs 4 (+ 4 msg-len)))
             (add-to-transcript conn (subseq hs 0 (+ 4 msg-len)))))))
-    ;; 3. handshake keys
-    (derive-handshake-keys conn)
-    ;; 4. encrypted handshake flight
-    (let ((finished nil))
-      (loop
-        ;; Once the server Finished is processed the handshake is complete; any
-        ;; further records already buffered are app-keyed (a pipelined
-        ;; NewSessionTicket) and must not be decrypted with the handshake key.
-        (when finished (return))
-        (multiple-value-bind (record remaining) (extract-record recv-buffer)
-          (unless record
-            (when finished (return))
-            (let ((more (transport-recv transport)))
-              (unless more (error 'tls-error :message "timed out awaiting handshake flight"))
-              (setf recv-buffer (buffer-append recv-buffer more))
-              (multiple-value-setq (record remaining) (extract-record recv-buffer))))
-          (when record
-            (setf recv-buffer remaining)
-            (let ((rtype (aref record 0)))
-              (cond
-                ((= rtype +content-change-cipher-spec+) nil)
-                ((= rtype +content-application-data+)
-                 (let ((dec (decrypt-record conn record)))
-                   (unless dec (error 'tls-error :message "handshake record decryption failed"))
-                   (unless (= (first dec) +content-handshake+)
-                     (error 'tls-error :message
-                            (format nil "unexpected inner content type ~d" (first dec))))
-                   (when (process-encrypted-handshake conn (second dec))
-                     (setf finished t))))
-                (t (error 'tls-error :message
-                          (format nil "unexpected record type ~d in handshake" rtype))))))))
-      (unless finished (error 'tls-error :message "server Finished not received"))
-      ;; Preserve any records the server pipelined after Finished (a NewSessionTicket,
-      ;; already app-keyed) so tls-recv processes them with the app key and the server
-      ;; sequence stays in sync with the response that follows.
-      (setf (tls-recv-buffer conn) recv-buffer))
-    ;; 5. client Finished (+ CCS for middlebox compatibility) then app keys
-    (let* ((th (transcript-hash conn))
-           (verify (finished-verify-data conn (tls-client-hs-secret conn)))
-           (finished-msg (make-handshake +hs-finished+ verify))
-           (encrypted (encrypt-record conn finished-msg +content-handshake+))
-           (ccs (bv 20 3 3 0 1 1)))
-      (derive-application-keys conn th)
-      (let ((early (tls-early-data conn)))
-        (if early
-            (let ((app (encrypt-record conn early +content-application-data+ :app t)))
-              (transport-send transport (concatenate 'vector ccs encrypted app)))
-            (transport-send transport (concatenate 'vector ccs encrypted)))))
-    (setf (tls-state conn) :established)
-    conn))
+    ;; 3. continue on the negotiated version's path. TLS 1.3 keeps the RFC 8446
+    ;;    key schedule and encrypted flight; TLS 1.2 runs its own ECDHE exchange
+    ;;    (see tls12.lisp).
+    (if (= (tls-version conn) +version-13+)
+        (tls13-continue-handshake conn transport recv-buffer)
+        (tls12-server-flight conn transport recv-buffer))))
+
+(defun tls13-continue-handshake (conn transport recv-buffer)
+  "Finish a TLS 1.3 handshake after ServerHello: derive handshake keys, process
+the encrypted server flight, and send the client Finished."
+  ;; handshake keys
+  (derive-handshake-keys conn)
+  ;; encrypted handshake flight
+  (let ((finished nil))
+    (loop
+      ;; Once the server Finished is processed the handshake is complete; any
+      ;; further records already buffered are app-keyed (a pipelined
+      ;; NewSessionTicket) and must not be decrypted with the handshake key.
+      (when finished (return))
+      (multiple-value-bind (record remaining) (extract-record recv-buffer)
+        (unless record
+          (when finished (return))
+          (let ((more (transport-recv transport)))
+            (unless more (error 'tls-error :message "timed out awaiting handshake flight"))
+            (setf recv-buffer (buffer-append recv-buffer more))
+            (multiple-value-setq (record remaining) (extract-record recv-buffer))))
+        (when record
+          (setf recv-buffer remaining)
+          (let ((rtype (aref record 0)))
+            (cond
+              ((= rtype +content-change-cipher-spec+) nil)
+              ((= rtype +content-application-data+)
+               (let ((dec (decrypt-record conn record)))
+                 (unless dec (error 'tls-error :message "handshake record decryption failed"))
+                 (unless (= (first dec) +content-handshake+)
+                   (error 'tls-error :message
+                          (format nil "unexpected inner content type ~d" (first dec))))
+                 (when (process-encrypted-handshake conn (second dec))
+                   (setf finished t))))
+              (t (error 'tls-error :message
+                        (format nil "unexpected record type ~d in handshake" rtype))))))))
+    (unless finished (error 'tls-error :message "server Finished not received"))
+    ;; Preserve any records the server pipelined after Finished (a NewSessionTicket,
+    ;; already app-keyed) so tls-recv processes them with the app key and the server
+    ;; sequence stays in sync with the response that follows.
+    (setf (tls-recv-buffer conn) recv-buffer))
+  ;; client Finished (+ CCS for middlebox compatibility) then app keys
+  (let* ((th (transcript-hash conn))
+         (verify (finished-verify-data conn (tls-client-hs-secret conn)))
+         (finished-msg (make-handshake +hs-finished+ verify))
+         (encrypted (encrypt-record conn finished-msg +content-handshake+))
+         (ccs (bv 20 3 3 0 1 1)))
+    (derive-application-keys conn th)
+    (let ((early (tls-early-data conn)))
+      (if early
+          (let ((app (encrypt-record conn early +content-application-data+ :app t)))
+            (transport-send transport (concatenate 'vector ccs encrypted app)))
+          (transport-send transport (concatenate 'vector ccs encrypted)))))
+  (setf (tls-state conn) :established)
+  conn)
 
 ;;; ---- application data ------------------------------------------------------
 
@@ -599,7 +640,9 @@ with the leaf certificate's public key. Raises on failure."
       (loop while (< offset len) do
         (let* ((chunk-size (min +max-fragment+ (- len offset)))
                (chunk (subseq data offset (+ offset chunk-size)))
-               (record (encrypt-record conn chunk +content-application-data+ :app t)))
+               (record (if (= (tls-version conn) +version-12+)
+                           (tls12-encrypt-record conn +content-application-data+ chunk)
+                           (encrypt-record conn chunk +content-application-data+ :app t))))
           (unless (transport-send transport record)
             (return-from tls-send nil))
           (incf offset chunk-size)))
@@ -608,6 +651,8 @@ with the leaf certificate's public key. Raises on failure."
 (defun tls-recv (conn)
   "Receive the next chunk of application data. Returns a byte vector, or NIL at
 end of stream."
+  (when (and (tls-version conn) (= (tls-version conn) +version-12+))
+    (return-from tls-recv (tls12-recv conn)))
   (let ((transport (tls-transport conn))
         (recv-buffer (or (tls-recv-buffer conn) #())))
     (loop
@@ -645,7 +690,9 @@ end of stream."
   (ignore-errors
     (when (eq (tls-state conn) :established)
       (transport-send (tls-transport conn)
-                      (encrypt-record conn (bv 1 0) +content-alert+ :app t))))
+                      (if (= (tls-version conn) +version-12+)
+                          (tls12-encrypt-record conn +content-alert+ (bv 1 0))
+                          (encrypt-record conn (bv 1 0) +content-alert+ :app t)))))
   (transport-close (tls-transport conn))
   (setf (tls-state conn) :closed)
   nil)
@@ -688,7 +735,9 @@ VERIFY may be:
 (defun connect (host port &key (verify t) (timeout 30) transport
                               (trust-store :system)
                               (alpn '("http/1.1")) early-data)
-  "Open a TLS 1.3 connection to HOST:PORT and complete the handshake.
+  "Open a TLS connection to HOST:PORT and complete the handshake. TLS 1.3 is
+preferred; servers that only speak TLS 1.2 fall back to the ECDHE path (see
+tls12.lisp).
 
   :verify      authentication policy, T by default (the secure default for real
                use): build and verify the certificate chain to a trusted CA,

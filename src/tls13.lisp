@@ -24,6 +24,7 @@
 (defconstant +hs-certificate-verify+ 15)
 (defconstant +hs-client-key-exchange+ 16)
 (defconstant +hs-finished+ 20)
+(defconstant +hs-key-update+ 24)   ; post-handshake rekey (RFC 8446 §4.6.3)
 
 (defconstant +ext-server-name+ 0)
 (defconstant +ext-supported-groups+ 10)
@@ -83,6 +84,7 @@
   server-handshake-key server-handshake-iv
   client-app-key client-app-iv
   server-app-key server-app-iv
+  client-app-secret server-app-secret   ; kept so KeyUpdate can advance them (RFC 8446 §4.6.3)
   (client-seq 0) (server-seq 0)
   (transcript nil)
   (recv-buffer #())
@@ -345,11 +347,61 @@
          (master (tls-master-secret conn))
          (c-ap (tls13-derive-secret master "c ap traffic" transcript-hash which))
          (s-ap (tls13-derive-secret master "s ap traffic" transcript-hash which)))
+    (setf (tls-client-app-secret conn) c-ap (tls-server-app-secret conn) s-ap)
     (multiple-value-bind (k iv) (derive-traffic-keys conn c-ap)
       (setf (tls-client-app-key conn) k (tls-client-app-iv conn) iv))
     (multiple-value-bind (k iv) (derive-traffic-keys conn s-ap)
       (setf (tls-server-app-key conn) k (tls-server-app-iv conn) iv))
     (setf (tls-client-seq conn) 0 (tls-server-seq conn) 0)))
+
+;;; ---- post-handshake key update (RFC 8446 §4.6.3) ---------------------------
+
+(defun %advance-secret (conn secret)
+  "The next-generation application_traffic_secret: HKDF-Expand-Label(secret,
+   \"traffic upd\", \"\", Hash.length)."
+  (let ((which (conn-hash conn)))
+    (tls13-hkdf-expand-label secret "traffic upd" #() (hash-length which) which)))
+
+(defun %key-update-recv (conn)
+  "Peer sent a KeyUpdate: advance OUR receiving (server) app secret + key/iv and reset
+   the receive sequence — the KeyUpdate itself was the last record under the old key."
+  (let ((next (%advance-secret conn (tls-server-app-secret conn))))
+    (setf (tls-server-app-secret conn) next)
+    (multiple-value-bind (k iv) (derive-traffic-keys conn next)
+      (setf (tls-server-app-key conn) k (tls-server-app-iv conn) iv))
+    (setf (tls-server-seq conn) 0)))
+
+(defun %key-update-send (conn)
+  "Send our own KeyUpdate (update_not_requested), then advance our sending (client) app
+   secret + key/iv and reset the send sequence — the KeyUpdate goes out under the OLD
+   key, subsequent records under the new one."
+  (transport-send (tls-transport conn)
+                  (encrypt-record conn (make-handshake +hs-key-update+ (bv 0))
+                                  +content-handshake+ :app t))
+  (let ((next (%advance-secret conn (tls-client-app-secret conn))))
+    (setf (tls-client-app-secret conn) next)
+    (multiple-value-bind (k iv) (derive-traffic-keys conn next)
+      (setf (tls-client-app-key conn) k (tls-client-app-iv conn) iv))
+    (setf (tls-client-seq conn) 0)))
+
+(defun handle-post-handshake (conn plaintext)
+  "Process post-handshake handshake messages (RFC 8446 §4.6) in a decrypted handshake
+   record: a KeyUpdate rekeys our receive keys (and, if update_requested, we answer with
+   our own KeyUpdate); NewSessionTicket and the rest are ignored.  Returns NIL."
+  (let ((i 0) (n (length plaintext)))
+    (loop while (<= (+ i 4) n) do
+      (let* ((mtype (aref plaintext i))
+             (len (logior (ash (aref plaintext (+ i 1)) 16)
+                          (ash (aref plaintext (+ i 2)) 8)
+                          (aref plaintext (+ i 3))))
+             (body (+ i 4)))
+        (when (> (+ body len) n) (return))
+        (when (= mtype +hs-key-update+)
+          (%key-update-recv conn)
+          (when (and (>= len 1) (= (aref plaintext body) 1))   ; update_requested
+            (%key-update-send conn)))
+        (setf i (+ body len)))))
+  nil)
 
 (defun finished-verify-data (conn secret)
   (let* ((which (conn-hash conn))
@@ -678,7 +730,8 @@ end of stream."
                      ((= ctype +content-application-data+)
                       (setf (tls-recv-buffer conn) recv-buffer)
                       (return-from tls-recv plaintext))
-                     ((= ctype +content-handshake+) nil)  ; NewSessionTicket etc.
+                     ((= ctype +content-handshake+)       ; KeyUpdate / NewSessionTicket / etc.
+                      (handle-post-handshake conn plaintext))
                      ((= ctype +content-alert+)
                       (setf (tls-recv-buffer conn) recv-buffer)
                       (return-from tls-recv nil))))))

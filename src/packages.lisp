@@ -37,7 +37,7 @@
    ;; transport
    #:make-socket-transport #:transport-send #:transport-recv #:transport-close
    ;; tls connection + public API
-   #:connect #:tls-send #:tls-recv #:tls-close
+   #:connect #:tls-send #:tls-recv #:tls-close #:*progress*
    #:tls-connection #:tls-connection-p
    #:tls-connection-cipher #:tls-connection-alpn
    #:tls-connection-peer-certificates

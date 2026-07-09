@@ -7,6 +7,15 @@
 
 (in-package #:seal)
 
+(defvar *progress* nil
+  "When bound to a function of (PHASE &optional DETAIL), CONNECT reports its
+   sub-phases — :resolving :connecting :securing :verifying — so a host can
+   surface fine-grained progress.  NIL (the default) disables reporting.")
+
+(defun note-progress (phase &optional detail)
+  "Call the progress hook if one is bound; never signals."
+  (when *progress* (ignore-errors (funcall *progress* phase detail))))
+
 (defstruct (transport (:constructor %make-transport))
   sender      ; (lambda (byte-vector) -> t/nil)   push bytes to the peer
   receiver    ; (lambda () -> byte-vector | nil)   pull up-to-N bytes, nil on EOF/timeout
@@ -28,11 +37,12 @@
   "Open a TCP connection to HOST:PORT and wrap it as a TRANSPORT.
 HOST may be a name or a dotted-quad string. TIMEOUT is the per-recv timeout in
 seconds."
-  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
-                               :type :stream :protocol :tcp))
-        (address (%resolve host)))
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket
+                                :type :stream :protocol :tcp))
+         (address (progn (note-progress :resolving host) (%resolve host))))
     (handler-case
         (progn
+          (note-progress :connecting host)
           (sb-bsd-sockets:socket-connect socket address port)
           (let ((fd (sb-bsd-sockets:socket-file-descriptor socket)))
             (%make-transport

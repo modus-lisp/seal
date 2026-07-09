@@ -760,7 +760,9 @@ Returns a TLS-CONNECTION, or signals a TLS-ERROR / TLS-CERTIFICATE-ERROR."
                                     :early-data early-data)))
     (handler-case
         (progn
+          (note-progress :securing host)
           (handshake conn (and (stringp host) host) alpn)
+          (note-progress :verifying host)
           (run-verification conn verify host trust-store)
           conn)
       (error (e)

@@ -17,12 +17,6 @@
    so no copy)."
   (coerce x '(simple-array (unsigned-byte 8) (*))))
 
-;;; Low-level word-masking helpers that lived in the old sha modules and are
-;;; still referenced elsewhere in seal (e.g. tls12 sequence-number arithmetic).
-(declaim (inline u32 u64))
-(defun u32 (x) (logand x #xffffffff))
-(defun u64 (x) (logand x #xffffffffffffffff))
-
 ;;; --- hashing (natrium SHA-2) ---------------------------------------------
 (defun sha256 (message) (natrium:sha256 (%u8v message)))
 (defun sha384 (message) (natrium:sha384 (%u8v message)))

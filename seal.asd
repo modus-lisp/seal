@@ -1,13 +1,15 @@
 ;;;; seal.asd — a pure-Common-Lisp TLS 1.3 client.
 (asdf:defsystem :seal
-  :description "A clean-room TLS 1.3 client in pure Common Lisp: AES-GCM,
-ChaCha20-Poly1305, SHA-2, HKDF, X25519 and the TLS 1.3 handshake + record
-layer, over a pluggable transport. No OpenSSL, no ironclad, no cl+ssl — the
-only platform dependency is SBCL's own sb-bsd-sockets."
+  :description "A clean-room TLS 1.3 client in pure Common Lisp: AES-GCM, HKDF,
+the TLS 1.3 handshake + record layer, and X.509 validation, over a pluggable
+transport. Symmetric/curve crypto (SHA-2, HMAC, ChaCha20-Poly1305, X25519,
+Ed25519, CSPRNG) comes from the sibling `natrium` library; seal keeps only what
+natrium does not provide (AES-GCM, bignum, RSA, ECDSA). No OpenSSL, no ironclad,
+no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
   :version "0.0.1"
   :author "ynniv"
   :license "MIT"
-  :depends-on ("sb-bsd-sockets")
+  :depends-on ("sb-bsd-sockets" "natrium")
   :serial t
   :components
   ((:module "src"
@@ -18,21 +20,13 @@ only platform dependency is SBCL's own sb-bsd-sockets."
      (:module "crypto"
       :serial t
       :components
-      ((:file "sha256")
-       (:file "sha512")
-       (:file "hmac")
+      ((:file "natrium-bridge")   ; SHA-2/HMAC/ChaCha20-Poly1305/X25519/Ed25519/CSPRNG -> natrium
        (:file "hkdf")
        (:file "aes")
        (:file "gcm")
-       (:file "chacha20")
-       (:file "poly1305")
-       (:file "aead")
-       (:file "x25519")
        (:file "bigint")
        (:file "rsa")
-       (:file "ecdsa")
-       (:file "ed25519")
-       (:file "entropy")))
+       (:file "ecdsa")))
      (:file "x509")
      (:file "verify")
      (:file "transport")

@@ -1,14 +1,18 @@
 # seal
 
 **A TLS 1.3 client in pure Common Lisp.** Clean-room — no OpenSSL, no cl+ssl, no
-ironclad, no FFI to any C crypto library. The only platform dependency is SBCL's
-own `sb-bsd-sockets` for the default TCP transport. A seal closes a channel.
+ironclad, no FFI to any C crypto library. The symmetric and curve primitives come
+from its pure-CL sibling [`natrium`](https://github.com/modus-lisp/natrium)
+(constant-time SHA-2 / HMAC / HKDF / ChaCha20-Poly1305 / X25519 / Ed25519,
+RFC/NIST/Wycheproof-gated); seal implements the rest itself — AES-GCM, bignum, RSA
+and ECDSA. The only platform dependency is SBCL's own `sb-bsd-sockets` for the
+default TCP transport. A seal closes a channel.
 
 seal takes a hostname and gives you an authenticated-encryption byte channel: the
-whole stack, from the AES / ChaCha20 / SHA-2 / X25519 primitives through the
-TLS 1.3 handshake and record layer, implemented from scratch. It is the secure
-transport for [`weft`](https://github.com/modus-lisp) (a pure-CL web engine) but
-stands alone.
+whole stack, from the AEAD / signature / curve primitives through the TLS 1.3
+handshake and record layer, implemented from scratch across seal and natrium. It
+is the secure transport for [`weft`](https://github.com/modus-lisp) (a pure-CL web
+engine) but stands alone.
 
 > ⚠️ **Security status: from-scratch, unaudited, research/educational.** This is
 > not a hardened TLS stack. It is **not constant-time** and makes **no claim of
@@ -171,14 +175,18 @@ hostname; and the server's Finished (transcript MAC).
 
 **What is NOT validated (deferred):** certificate **revocation** (OCSP / CRL),
 **name constraints**, and full certificate-**policy / extended-key-usage**
-processing. seal is also **non-constant-time** and **unaudited** — research-grade.
+processing. seal's own primitives (AES-GCM, RSA, ECDSA) are **not constant-time**
+and the whole is **unaudited** — research-grade. (The primitives it delegates to
+`natrium` — ChaCha20-Poly1305, X25519, Ed25519 — are written in a constant-time
+discipline.)
 
 ## Randomness
 
-Ephemeral keys and nonces come from `secure-random-bytes`, which reads
-`/dev/urandom`. If that is unavailable it falls back to the (non-cryptographic)
-Lisp PRNG and emits a warning — a bare-metal or restricted host should supply a
-real CSPRNG.
+Ephemeral keys and nonces come from `secure-random-bytes`, which delegates to
+natrium's `random-bytes` — an HMAC-DRBG (NIST SP 800-90A) seeded from the OS
+entropy source (`/dev/urandom` by default, overridable on a bare-metal host).
+Unlike a bare `/dev/urandom` read it **fails closed** rather than falling back to
+a non-cryptographic PRNG.
 
 ## Tests
 

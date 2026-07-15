@@ -4,7 +4,7 @@
   (:use #:cl)
   (:export
    ;; hashes
-   #:sha256 #:sha384 #:sha512
+   #:sha1 #:sha256 #:sha384 #:sha512
    ;; hmac
    #:hmac-sha256 #:hmac-sha384
    ;; hkdf

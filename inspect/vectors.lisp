@@ -47,6 +47,10 @@
                             (cdr c))
            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39"))
 
+  (format t "~%== SHA-1 (FIPS 180-4) ==~%")
+  (check "SHA-1 abc" (sha1 (ascii "abc")) "a9993e364706816aba3e25717850c26c9cd0d89d")
+  (check "SHA-1 empty" (sha1 (ascii "")) "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+
   (format t "~%== SHA-2 (FIPS 180-4) ==~%")
   (check "SHA-256 empty" (sha256 (ascii ""))
          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")

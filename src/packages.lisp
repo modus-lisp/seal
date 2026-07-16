@@ -5,6 +5,7 @@
   (:export
    ;; hashes
    #:sha1 #:sha256 #:sha384 #:sha512
+   #:sha1-init #:sha1-update #:sha1-final    ; streaming SHA-1
    ;; hmac
    #:hmac-sha256 #:hmac-sha384
    ;; hkdf

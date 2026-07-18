@@ -43,6 +43,11 @@
    #:tls-connection-cipher #:tls-connection-alpn
    #:tls-connection-peer-certificates
    #:with-connection
+   ;; dtls 1.2 (webrtc)
+   #:make-dtls-session #:dtls-session #:dtls-session-p
+   #:dtls-client-handshake #:dtls-send-app #:dtls-handle-datagram
+   #:dtls-fingerprint #:dtls-done #:dtls-cipher
+   #:dtls-peer-fingerprint #:dtls-peer-cert #:dtls-expected-peer-fingerprint
    ;; gray stream
    #:tls-stream #:make-tls-stream #:tls-stream-connection
    ;; conditions

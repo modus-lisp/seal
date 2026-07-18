@@ -1,6 +1,7 @@
 # seal
 
-**A TLS 1.3 client in pure Common Lisp.** Clean-room — no OpenSSL, no cl+ssl, no
+**A TLS 1.3 client in pure Common Lisp** — with a TLS 1.2 fallback and a **DTLS 1.2**
+client (for WebRTC). Clean-room — no OpenSSL, no cl+ssl, no
 ironclad, no FFI to any C crypto library. The symmetric and curve primitives come
 from its pure-CL sibling [`natrium`](https://github.com/modus-lisp/natrium)
 (constant-time SHA-2 / HMAC / HKDF / ChaCha20-Poly1305 / X25519 / Ed25519,
@@ -27,7 +28,8 @@ engine) but stands alone.
 
 | Layer | Coverage |
 |---|---|
-| **Handshake** | TLS 1.3 full 1-RTT (RFC 8446), X25519 key exchange, SNI, ALPN |
+| **Handshake** | TLS 1.3 full 1-RTT (RFC 8446), X25519 key exchange, SNI, ALPN; TLS 1.2 fallback (RFC 5246, ECDHE) |
+| **DTLS 1.2** | client (RFC 6347) for WebRTC: record/flight/cookie layer + **mutual auth** (client Certificate + CertificateVerify) over the TLS 1.2 schedule — verified against aiortc |
 | **Cipher suites** | `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256` |
 | **Key schedule** | HKDF-Expand-Label traffic secrets, handshake + application keys, Finished verify |
 | **Record layer** | AEAD record protection, fragmentation, `close_notify` |
@@ -38,8 +40,8 @@ engine) but stands alone.
 | **Transport** | pluggable; default TCP over `sb-bsd-sockets` |
 | **Stream** | Gray-stream wrapper — reads/writes like an ordinary binary stream |
 
-Not implemented: client certificates, PSK / session resumption / 0-RTT, TLS 1.2
-fallback, key update, groups other than X25519, and — within certificate
+Not implemented: TLS client certificates (the **DTLS** client does mutual auth), PSK /
+session resumption / 0-RTT, key update, groups other than X25519, and — within certificate
 validation — **revocation (OCSP/CRL), name constraints, and full policy/EKU
 enforcement** (see [Certificate validation](#certificate-validation)).
 

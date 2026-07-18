@@ -1,7 +1,8 @@
 ;;;; seal.asd — a pure-Common-Lisp TLS 1.3 client.
 (asdf:defsystem :seal
-  :description "A clean-room TLS 1.3 client in pure Common Lisp: AES-GCM, HKDF,
-the TLS 1.3 handshake + record layer, and X.509 validation, over a pluggable
+  :description "A clean-room TLS 1.3 client in pure Common Lisp (with a TLS 1.2
+fallback and a DTLS 1.2 client for WebRTC): AES-GCM, HKDF, the TLS 1.3 handshake +
+record layer, and X.509 validation, over a pluggable
 transport. Symmetric/curve crypto (SHA-2, HMAC, ChaCha20-Poly1305, X25519,
 Ed25519, CSPRNG) comes from the sibling `natrium` library; seal keeps only what
 natrium does not provide (AES-GCM, bignum, RSA, ECDSA). No OpenSSL, no ironclad,

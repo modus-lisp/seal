@@ -1,9 +1,10 @@
-;;;; ecdsa.lisp — ECDSA signature verification over NIST P-256 and P-384.
+;;;; ecdsa.lisp — ECDSA signatures over NIST P-256 and P-384 (sign + verify).
 ;;;;
 ;;;; Short-Weierstrass curves  y^2 = x^3 + a*x + b  (mod p)  with a = -3, over
 ;;;; the prime fields of secp256r1 (P-256) and secp384r1 (P-384). Affine point
-;;;; arithmetic on Common Lisp bignums, plus the ECDSA verification equation
-;;;; (RFC 6979 / SEC 1). Verification only, not constant-time.
+;;;; arithmetic on Common Lisp bignums, plus the ECDSA sign/verify equations
+;;;; (SEC 1). Not constant-time — signing uses a fresh random nonce (WebRTC
+;;;; ephemeral keys), so no long-term-key side-channel exposure here.
 
 (in-package #:seal)
 
@@ -183,3 +184,40 @@ PUBLIC-POINT is (cons x y). HASH is the raw digest byte vector."
        (cons (os2ip (subseq bytes 1 (1+ flen)))
              (os2ip (subseq bytes (1+ flen)))))
       (t nil))))
+
+(defun ec-field-len (curve) (ceiling (integer-length (ec-p curve)) 8))
+
+(defun ec-encode-point (curve pt)
+  "Encode an affine point as an uncompressed SEC1 octet string (0x04 || X || Y)."
+  (let ((flen (ec-field-len curve)))
+    (concatenate '(simple-array (unsigned-byte 8) (*))
+                 #(#x04) (i2osp (car pt) flen) (i2osp (cdr pt) flen))))
+
+;;; ---- ECDSA signing ---------------------------------------------------------
+
+(defun ec-random-scalar (curve)
+  "A uniform random scalar in [1, n-1] on CURVE (rejection sampling — n is within a
+hair of 2^bits for both curves here, so rejections are astronomically rare)."
+  (let* ((n (ec-n curve)) (nbytes (ceiling (integer-length n) 8)))
+    (loop for k = (os2ip (secure-random-bytes nbytes))
+          when (< 0 k n) return k)))
+
+(defun ec-generate-key (curve)
+  "Generate an ECDSA key pair on CURVE.  Returns (values private-scalar public-point),
+the public point being D*G as (cons x y)."
+  (let ((d (ec-random-scalar curve)))
+    (values d (ec-scalar-mult curve d (cons (ec-gx curve) (ec-gy curve))))))
+
+(defun ecdsa-sign (curve d hash)
+  "Sign the digest HASH with private scalar D on CURVE (SEC 1 §4.1.3, random nonce).
+Returns (values r s), both in [1, n-1], retrying the vanishing r/s cases."
+  (let* ((n (ec-n curve))
+         (e (ecdsa-truncate-hash hash n))
+         (g (cons (ec-gx curve) (ec-gy curve))))
+    (loop
+      (let* ((k (ec-random-scalar curve))
+             (r (mod (car (ec-scalar-mult curve k g)) n)))
+        (unless (zerop r)
+          (let ((s (mod (* (mod-inverse k n) (mod (+ e (* r d)) n)) n)))
+            (unless (zerop s)
+              (return (values r s)))))))))

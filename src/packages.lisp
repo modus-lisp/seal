@@ -21,7 +21,8 @@
    ;; signature verification
    #:rsa-public-key #:make-rsa-public-key #:rsa-n #:rsa-e
    #:rsa-pkcs1-verify #:rsa-pss-verify
-   #:ecdsa-verify #:ec-decode-point #:*p256* #:*p384*
+   #:ecdsa-verify #:ecdsa-sign #:ec-generate-key #:ec-encode-point #:ec-decode-point
+   #:ec-field-len #:*p256* #:*p384*
    #:ed25519-verify
    ;; entropy
    #:secure-random-bytes
@@ -46,6 +47,7 @@
    ;; dtls 1.2 (webrtc)
    #:make-dtls-session #:dtls-session #:dtls-session-p
    #:dtls-client-handshake #:dtls-send-app #:dtls-handle-datagram
+   #:+sig-rsa-pkcs1-sha256+ #:+sig-ecdsa-secp256r1-sha256+
    #:dtls-fingerprint #:dtls-done #:dtls-cipher
    #:dtls-peer-fingerprint #:dtls-peer-cert #:dtls-expected-peer-fingerprint
    ;; gray stream

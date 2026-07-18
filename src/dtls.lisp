@@ -296,34 +296,46 @@ it as a CertificateVerify body: SignatureAndHashAlgorithm(2) || len(2) || sig."
 ;;; record with a *fresh* record sequence number, so retransmissions are never
 ;;; dropped as replays.
 
-(defun dtls-transmit-flight (s specs)
-  (let ((epoch 0))
+(defun dtls-transmit-flight (s specs &key (mtu 1200))
+  "(Re)transmit a flight.  Each record gets a fresh record-sequence number (so a retransmit is
+never dropped as a replay), but records are COALESCED into as few datagrams as the MTU allows —
+DTLS permits multiple records per datagram, and fewer packets means far less loss exposure: a
+5-message flight over a 15% link goes from P(arrive)=0.85^5≈0.44 to ≈0.85 in one datagram."
+  (let ((epoch 0) (recs '()))
+    ;; build every record first (assigns the fresh sequence numbers in flight order)
     (dolist (spec specs)
       (ecase (car spec)
-        (:plain
-         (funcall (dtls-send-fn s)
-                  (dtls-record +content-handshake+ 0 (prog1 (dtls-seq0 s) (incf (dtls-seq0 s)))
-                               (cadr spec))))
-        (:ccs
-         (funcall (dtls-send-fn s)
-                  (dtls-record +content-change-cipher-spec+ 0
-                               (prog1 (dtls-seq0 s) (incf (dtls-seq0 s))) (%db 1)))
-         (setf epoch 1))
-        (:enc
-         (funcall (dtls-send-fn s) (dtls-encrypt s +content-handshake+ (cadr spec) :epoch epoch)))))))
+        (:plain (push (dtls-record +content-handshake+ 0
+                                   (prog1 (dtls-seq0 s) (incf (dtls-seq0 s))) (cadr spec)) recs))
+        (:ccs   (push (dtls-record +content-change-cipher-spec+ 0
+                                   (prog1 (dtls-seq0 s) (incf (dtls-seq0 s))) (%db 1)) recs)
+                (setf epoch 1))
+        (:enc   (push (dtls-encrypt s +content-handshake+ (cadr spec) :epoch epoch) recs))))
+    ;; greedily pack the records into datagrams <= MTU
+    (let ((dg '()) (len 0))
+      (flet ((flush () (when dg (funcall (dtls-send-fn s) (apply #'%dcat (nreverse dg)))
+                         (setf dg '() len 0))))
+        (dolist (rec (nreverse recs))
+          (when (and dg (> (+ len (length rec)) mtu)) (flush))
+          (push rec dg) (incf len (length rec)))
+        (flush)))))
 
 ;;; ---- the client handshake --------------------------------------------------
 
-(defun dtls-client-handshake (s recv-fn &key (timeout 1.0) (max-retries 25))
+(defun dtls-client-handshake (s recv-fn &key (timeout 1.0) (max-timeout 8.0) (max-retries 30))
   "Drive the DTLS 1.2 client handshake to completion.  RECV-FN is called with a
-timeout (seconds) and returns the next inbound datagram or NIL on timeout.
-Returns S on success; signals TLS-ERROR otherwise."
+timeout (seconds) and returns the next inbound datagram or NIL on timeout.  The
+retransmission timer starts at TIMEOUT and doubles on each miss up to MAX-TIMEOUT
+(RFC 6347 §4.2.4.1), resetting whenever a flight arrives — so a lossy link recovers
+in ~TIMEOUT rather than a fixed second per lost packet, while a high-RTT link backs
+off instead of storming duplicates.  Returns S on success; signals TLS-ERROR otherwise."
   (setf (dtls-eph-priv s) (secure-random-bytes 32)
         (dtls-eph-pub s) (x25519-public-key (dtls-eph-priv s))
         (dtls-client-random s) (secure-random-bytes 32))
   (let ((cur-ch (dtls-build-client-hello s #()))       ; flight 1: ClientHello, no cookie
         (server-done nil)
-        (tries 0))
+        (tries 0)
+        (to timeout))                                  ; current retransmit timer (backs off)
     (flet ((send-ch ()
              (funcall (dtls-send-fn s)
                       (dtls-record +content-handshake+ 0
@@ -332,15 +344,17 @@ Returns S on success; signals TLS-ERROR otherwise."
       (send-ch)
       (%dlog "~&[dtls] -> ClientHello (flight 1)~%")
       (loop until server-done do
-        (let ((dg (funcall recv-fn timeout)))
+        (let ((dg (funcall recv-fn to)))
           (cond
             ((null dg)
              (incf tries)
-             (%dlog "[dtls] recv timeout (try ~a), resending ClientHello~%" tries)
+             (setf to (min max-timeout (* 2 to)))     ; exponential backoff
+             (%dlog "[dtls] recv timeout (try ~a, next ~,2fs), resending ClientHello~%" tries to)
              (when (> tries max-retries)
                (error 'tls-error :message "DTLS: timed out awaiting server flight"))
              (send-ch))
             (t
+             (setf to timeout)                        ; a flight arrived: reset the timer
              (%dlog "[dtls] <- datagram ~a bytes, ~a record(s)~%"
                     (length dg) (length (dtls-split-records dg)))
              (dolist (rec (dtls-split-records dg))
@@ -411,21 +425,24 @@ Returns S on success; signals TLS-ERROR otherwise."
                               (when cv-hs (list (list :plain cv-hs)))
                               (list (list :ccs) (list :enc fin-hs)))))
           (dtls-add-transcript s fin-hs)           ; server Finished covers our Finished
-          (let ((expected-server-fin (dtls-finished-data s "server finished")))
+          (let ((expected-server-fin (dtls-finished-data s "server finished"))
+                (to timeout))                          ; flight-2 retransmit timer (backs off)
             ;; ----- send our flight, await the server's CCS + Finished -----
             (%dlog "[dtls] -> flight 2 (Cert/CKE/CertVerify/CCS/Finished) cipher=0x~4,'0x cert-req=~a~%"
                    (or (dtls-cipher s) 0) (dtls-cert-requested s))
             (dtls-transmit-flight s specs)
             (setf tries 0)
             (loop until (dtls-done s) do
-              (let ((dg (funcall recv-fn timeout)))
+              (let ((dg (funcall recv-fn to)))
                 (cond
                   ((null dg)
                    (incf tries)
+                   (setf to (min max-timeout (* 2 to)))      ; exponential backoff
                    (when (> tries max-retries)
                      (error 'tls-error :message "DTLS: timed out awaiting server Finished"))
                    (dtls-transmit-flight s specs))
                   (t
+                   (setf to timeout)                         ; a flight arrived: reset the timer
                    (dolist (rec (dtls-split-records dg))
                      (when (and (= (dtls-record-type rec) +content-handshake+)
                                 (= (dtls-record-epoch rec) 1))

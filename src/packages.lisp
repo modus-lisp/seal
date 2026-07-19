@@ -12,6 +12,7 @@
    #:hkdf-extract #:hkdf-expand #:hkdf
    #:tls13-hkdf-expand-label #:tls13-derive-secret
    ;; block cipher / aead
+   #:des-key-schedule #:des-encrypt-block   ; legacy DES (VNC auth)
    #:aes-128-encrypt-block #:aes-256-encrypt-block
    #:aes-128-decrypt-block #:aes-256-decrypt-block
    #:aes-gcm-encrypt #:aes-gcm-decrypt

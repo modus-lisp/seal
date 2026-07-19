@@ -24,6 +24,14 @@
                                 (unhex "00112233445566778899aabbccddeeff"))
          "8ea2b7ca516745bfeafc49904b496089")
 
+  (format t "~%== DES (FIPS 46-3) ==~%")
+  (check "DES encrypt (KAT)"
+         (des-encrypt-block (unhex "0123456789abcdef") (des-key-schedule (unhex "133457799bbcdff1")))
+         "85e813540f0ab405")
+  (check "DES encrypt (zero)"
+         (des-encrypt-block (unhex "0000000000000000") (des-key-schedule (unhex "0000000000000000")))
+         "8ca64de9c1b123a7")
+
   (format t "~%== AES-GCM (McGrew-Viega Test Cases 3 & 4) ==~%")
   (let ((c (aes-gcm-encrypt (unhex "feffe9928665731c6d6a8f9467308308")
                             (unhex "cafebabefacedbaddecaf888")

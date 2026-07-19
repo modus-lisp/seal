@@ -23,6 +23,7 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
       :components
       ((:file "natrium-bridge")   ; SHA-2/HMAC/ChaCha20-Poly1305/X25519/Ed25519/CSPRNG -> natrium
        (:file "sha1")            ; legacy hash (interop; not in natrium)
+       (:file "des")             ; legacy block cipher (interop: VNC auth); not in natrium
        (:file "hkdf")
        (:file "aes")
        (:file "gcm")

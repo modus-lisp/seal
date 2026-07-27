@@ -214,7 +214,7 @@ is complete, else NIL."
          ;; use_srtp (RFC 5764): WebRTC stacks (aiortc) reject a DTLS handshake
          ;; that negotiates no DTLS-SRTP profile, even for a data-channel-only
          ;; session.  Offer the two profiles aiortc supports; empty MKI.
-         (srtp (dtls-ext 14 (%db 0 4 0 1 0 7 0)))   ; SRTP_AES128_CM_SHA1_80 + SRTP_AEAD_AES_128_GCM
+         (srtp (dtls-ext 14 (%db 0 2 0 7 0)))       ; SRTP_AEAD_AES_128_GCM only (webrtc-media implements GCM)
          (exts (%dcat groups ecpf sigalgs reneg srtp))
          (suites (%db #xc0 #x2b #xc0 #x2f)))                                  ; ECDHE_ECDSA / ECDHE_RSA + AES128-GCM
     (%dcat (%db +dtls-12-major+ +dtls-12-minor+)          ; client_version

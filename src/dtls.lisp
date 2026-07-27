@@ -474,3 +474,17 @@ payloads (epoch-1 appdata only).  Handshake/CCS records are ignored."
         (multiple-value-bind (type pt) (dtls-decrypt s rec)
           (when (and pt (= type +content-application-data+))
             (push pt out)))))))
+
+(defun dtls-export-keying-material (session label length &optional context)
+  "RFC 5705 keying-material exporter over the finished DTLS 1.2 SESSION's master secret.
+For DTLS-SRTP (RFC 5764) call with LABEL \"EXTRACTOR-dtls_srtp\", no CONTEXT, and
+LENGTH = 2*(SRTP-key-len + SRTP-salt-len).  Seed is client_random ‖ server_random."
+  (tls12-prf (dtls-master-secret session) label
+             (let ((seed (concatenate '(vector (unsigned-byte 8))
+                                      (dtls-client-random session) (dtls-server-random session))))
+               (if context
+                   (concatenate '(vector (unsigned-byte 8)) seed
+                                (vector (ldb (byte 8 8) (length context)) (ldb (byte 8 0) (length context)))
+                                context)
+                   seed))
+             length))

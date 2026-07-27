@@ -51,6 +51,7 @@
    #:+sig-rsa-pkcs1-sha256+ #:+sig-ecdsa-secp256r1-sha256+
    #:dtls-fingerprint #:dtls-done #:dtls-cipher
    #:dtls-peer-fingerprint #:dtls-peer-cert #:dtls-expected-peer-fingerprint
+   #:dtls-export-keying-material          ; RFC 5705 exporter (DTLS-SRTP keys)
    ;; gray stream
    #:tls-stream #:make-tls-stream #:tls-stream-connection
    ;; conditions

@@ -48,6 +48,7 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
     ((:file "util")
      (:file "vectors")
      (:file "negatives")
+     (:file "tls12")
      (:file "live")
      (:file "self-test"))))
   :perform (asdf:test-op (o c)

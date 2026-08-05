@@ -182,15 +182,32 @@ request context, no per-certificate extensions)."
         (incf pos (+ 3 cert-len))))
     (setf (tls-peer-certificates conn) (nreverse certs))))
 
+(defun tls12-named-curve (id)
+  "The curve a named_curve id selects: :X25519, or an EC-CURVE for the NIST ones.
+NIL means we advertised it but cannot do the key exchange over it."
+  (case id
+    (#x001d :x25519)
+    (#x0017 *p256*)
+    (#x0018 *p384*)
+    (t nil)))
+
 (defun tls12-parse-ske (hs-msg)
   "Parse an ECDHE ServerKeyExchange. Returns (values params pubkey sigalg
-signature), where PARAMS is the signed ServerECDHParams byte range."
+signature curve), where PARAMS is the signed ServerECDHParams byte range and
+CURVE is what TLS12-NAMED-CURVE made of the server's choice.
+
+The server picks the group, not us, and it picks from the supported_groups we
+advertise — which includes the NIST curves so that servers holding a P-256 ECDSA
+certificate will talk to us at all.  A server taking us up on secp256r1 for the
+key exchange itself is therefore an ordinary outcome, not an exotic one, and CDNs
+in front of podcast audio do exactly that."
   (let* ((pos 4)
          (curve-type (aref hs-msg pos)))
     (unless (= curve-type 3)
       (error 'tls-error :message "ServerKeyExchange: expected named_curve"))
-    (let ((named-curve (bytes-u16 hs-msg (+ pos 1))))
-      (unless (= named-curve #x001d)             ; x25519
+    (let* ((named-curve (bytes-u16 hs-msg (+ pos 1)))
+           (curve (tls12-named-curve named-curve)))
+      (unless curve
         (error 'tls-error
                :message (format nil "ServerKeyExchange: unsupported curve 0x~4,'0x" named-curve)))
       (let* ((pk-len (aref hs-msg (+ pos 3)))   ; curve_type(1) + named_curve(2)
@@ -200,7 +217,31 @@ signature), where PARAMS is the signed ServerECDHParams byte range."
              (sigalg (bytes-u16 hs-msg sig-pos))
              (sig-len (bytes-u16 hs-msg (+ sig-pos 2)))
              (signature (subseq hs-msg (+ sig-pos 4) (+ sig-pos 4 sig-len))))
-        (values params pubkey sigalg signature)))))
+        (values params pubkey sigalg signature curve)))))
+
+(defun tls12-ecdhe-client-share (curve server-pubkey)
+  "Our ClientKeyExchange public value and the ECDHE premaster secret, as
+(values client-public premaster).
+
+For x25519 the caller already has a key pair (the TLS 1.3 key_share), so this is
+only ever asked about the NIST curves, where the client key is generated here
+because nothing before ServerKeyExchange knew which curve to generate on.
+
+The server's point is validated on the curve before it is multiplied.  Skipping
+that is the classic invalid-curve attack: a point off the curve puts the scalar
+multiplication in a different, small group, and the premaster leaks our private
+scalar.  The premaster is the X coordinate ONLY, left-padded to the field length
+(RFC 4492 §5.10) — using the full encoded point instead is a silent
+interoperability failure that shows up as a Finished mismatch."
+  (let ((point (ec-decode-point curve server-pubkey)))
+    (unless (and point (not (ec-infinity-p point)) (ec-on-curve-p curve point))
+      (error 'tls-error :message "ServerKeyExchange: server point is not on the curve"))
+    (multiple-value-bind (d q) (ec-generate-key curve)
+      (let ((shared (ec-scalar-mult curve d point)))
+        (when (ec-infinity-p shared)
+          (error 'tls-error :message "ECDHE shared secret is the point at infinity"))
+        (values (ec-encode-point curve q)
+                (i2osp (car shared) (ec-field-len curve)))))))
 
 (defun tls12-verify-ske (conn params sigalg signature)
   "Verify the ServerKeyExchange signature over
@@ -226,7 +267,8 @@ already read past the ServerHello. Returns CONN or signals a TLS-ERROR."
   (let ((buffer recv-buffer)
         (hs-buffer #())
         (server-done nil)
-        (ske-params nil) (ske-pubkey nil) (ske-sigalg nil) (ske-sig nil))
+        (ske-params nil) (ske-pubkey nil) (ske-sigalg nil) (ske-sig nil)
+        (ske-curve nil))
     (labels ((next-record ()
                (loop
                  (multiple-value-bind (record remaining) (extract-record buffer)
@@ -262,7 +304,8 @@ already read past the ServerHello. Returns CONN or signals a TLS-ERROR."
                   (cond
                     ((= htype +hs-certificate+) (tls12-parse-certificate conn msg))
                     ((= htype +hs-server-key-exchange+)
-                     (multiple-value-setq (ske-params ske-pubkey ske-sigalg ske-sig)
+                     (multiple-value-setq (ske-params ske-pubkey ske-sigalg ske-sig
+                                                      ske-curve)
                        (tls12-parse-ske msg)))
                     ((= htype +hs-server-hello-done+) (setf server-done t))
                     ;; CertificateRequest is folded into the transcript and
@@ -278,17 +321,22 @@ already read past the ServerHello. Returns CONN or signals a TLS-ERROR."
       (setf (tls-server-public-key conn) ske-pubkey)
       (when (tls-verify conn)
         (tls12-verify-ske conn ske-params ske-sigalg ske-sig))
-      ;; --- ClientKeyExchange (our X25519 public key, reused from the key_share).
-      ;;     It is folded into the transcript before deriving keys so that the
-      ;;     extended_master_secret session_hash covers it.
-      (let* ((pub (tls-client-public-key conn))
-             (cke (make-handshake +hs-client-key-exchange+
-                                  (concatenate '(vector (unsigned-byte 8))
-                                               (vector (length pub)) pub))))
-        (add-to-transcript conn cke)
-        (transport-send transport (make-record +content-handshake+ cke)))
-      ;; --- shared secret + record keys.
-      (tls12-derive-keys conn (x25519 (tls-client-private-key conn) ske-pubkey))
+      ;; --- ClientKeyExchange: our public value on whichever curve the server
+      ;;     chose — the X25519 key_share we already generated, or a fresh NIST
+      ;;     key pair.  It is folded into the transcript before deriving keys so
+      ;;     that the extended_master_secret session_hash covers it.
+      (multiple-value-bind (pub premaster)
+          (if (eq ske-curve :x25519)
+              (values (tls-client-public-key conn)
+                      (x25519 (tls-client-private-key conn) ske-pubkey))
+              (tls12-ecdhe-client-share ske-curve ske-pubkey))
+        (let ((cke (make-handshake +hs-client-key-exchange+
+                                   (concatenate '(vector (unsigned-byte 8))
+                                                (vector (length pub)) pub))))
+          (add-to-transcript conn cke)
+          (transport-send transport (make-record +content-handshake+ cke)))
+        ;; --- shared secret + record keys.
+        (tls12-derive-keys conn premaster))
       ;; --- ChangeCipherSpec, then the encrypted client Finished.
       (transport-send transport (bv +content-change-cipher-spec+ 3 3 0 1 1))
       (let ((fin (make-handshake +hs-finished+

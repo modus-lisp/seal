@@ -166,9 +166,12 @@
 (defun ext-supported-groups ()
   ;; x25519 (preferred) plus secp256r1/secp384r1. The NIST curves are advertised
   ;; so that TLS 1.2 servers with an ECDSA-on-P-256/384 certificate accept the
-  ;; handshake (the elliptic_curves extension also constrains the cert curve);
-  ;; the ECDHE key exchange itself still runs over x25519, for which we send the
-  ;; sole key_share.
+  ;; handshake at all (the elliptic_curves extension also constrains the cert
+  ;; curve) — and, having advertised them, we must be able to do the key exchange
+  ;; over them, because the choice is the server's: see TLS12-ECDHE-CLIENT-SHARE.
+  ;; Under TLS 1.3 the sole key_share is still x25519, and HelloRetryRequest is
+  ;; not implemented, so a 1.3 server that will not do x25519 is not handled.
+  ;; None has turned up; if one does, that is the gap to close.
   (build-extension +ext-supported-groups+ (bv 0 6 0 #x1d 0 #x17 0 #x18)))
 
 (defun ext-signature-algorithms ()

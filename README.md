@@ -28,7 +28,7 @@ engine) but stands alone.
 
 | Layer | Coverage |
 |---|---|
-| **Handshake** | TLS 1.3 full 1-RTT (RFC 8446), X25519 key exchange, SNI, ALPN; TLS 1.2 fallback (RFC 5246, ECDHE) |
+| **Handshake** | TLS 1.3 full 1-RTT (RFC 8446), X25519 key exchange, SNI, ALPN; TLS 1.2 fallback (RFC 5246, ECDHE over x25519 / secp256r1 / secp384r1 — the server's choice) |
 | **DTLS 1.2** | client (RFC 6347) for WebRTC: record/flight/cookie layer + **mutual auth** (client Certificate + CertificateVerify) over the TLS 1.2 schedule — verified against aiortc |
 | **Cipher suites** | `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256` |
 | **Key schedule** | HKDF-Expand-Label traffic secrets, handshake + application keys, Finished verify |

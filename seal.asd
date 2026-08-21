@@ -39,6 +39,20 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
      (:file "stream"))))
   :in-order-to ((asdf:test-op (asdf:test-op :seal/test))))
 
+(asdf:defsystem :seal/http
+  :description "An HTTP/1.1 client on seal's TLS: URLs, headers, chunked and
+Content-Length bodies, and 3xx redirect following.  Separate from :seal on
+purpose — seal is a TLS implementation, and a socket carrying some other protocol
+should not have to drag an HTTP parser along with it.  Deliberately no cookies,
+no charset decoding and no Content-Encoding: those are browser concerns, and
+weft.fetch layers them on top of exactly this."
+  :version "0.0.1"
+  :author "ynniv"
+  :license "MIT"
+  :depends-on ("seal" "sb-bsd-sockets")
+  :serial t
+  :components ((:module "src" :serial t :components ((:file "http")))))
+
 (asdf:defsystem :seal/test
   :depends-on ("seal")
   :components

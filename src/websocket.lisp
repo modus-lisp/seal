@@ -59,7 +59,12 @@
 (defun fail (fmt &rest args)
   (error 'websocket-error :text (apply #'format nil fmt args)))
 
-(defstruct websocket stream host (state :open) (fragments nil) (frag-opcode nil))
+(defstruct websocket stream host (state :open) (fragments nil) (frag-opcode nil)
+  ;; Duplex use is the normal case — a read loop on one thread, sends from
+  ;; another (that is exactly how an event-driven client is built on top of this).
+  ;; Two writers interleaving frames would corrupt the stream, and on TLS would
+  ;; desynchronise the record layer, so every send takes this.
+  (send-lock (sb-thread:make-mutex :name "seal-ws-send")))
 
 (defun open-p (ws) (eq (websocket-state ws) :open))
 
@@ -179,12 +184,14 @@
       (fail "unsupported scheme ~s" scheme))
     (values host port path securep)))
 
-(defun connect (url &key (timeout 30))
-  "Open a WebSocket to URL (ws:// or wss://).  wss rides seal's TLS."
+(defun connect (url &key (timeout 30) (verify t))
+  "Open a WebSocket to URL (ws:// or wss://).  wss rides seal's TLS; VERIFY is
+   seal's certificate policy and defaults to full verification."
   (declare (ignore timeout))
   (multiple-value-bind (host port path securep) (parse-ws-url url)
     (let* ((stream (if securep
-                       (seal:make-tls-stream (seal:connect host port))
+                       (seal:make-tls-stream
+                        (seal:connect host port :verify verify :alpn nil))
                        (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
                                                   :type :stream :protocol :tcp)))
                          (sb-bsd-sockets:socket-connect
@@ -208,8 +215,9 @@
 
 (defun send-frame (ws opcode payload)
   (unless (open-p ws) (fail "socket is ~(~a~)" (websocket-state ws)))
-  (write-sequence (build-frame opcode payload) (websocket-stream ws))
-  (finish-output (websocket-stream ws)))
+  (sb-thread:with-recursive-lock ((websocket-send-lock ws))
+    (write-sequence (build-frame opcode payload) (websocket-stream ws))
+    (finish-output (websocket-stream ws))))
 
 (defun send-text (ws string) (send-frame ws +text+ (utf8 string)))
 (defun send-binary (ws bytes) (send-frame ws +binary+ bytes))

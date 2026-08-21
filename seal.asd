@@ -53,6 +53,18 @@ weft.fetch layers them on top of exactly this."
   :serial t
   :components ((:module "src" :serial t :components ((:file "http")))))
 
+(asdf:defsystem :seal/websocket
+  :description "An RFC 6455 WebSocket client on seal's TLS.  The framing half is
+transport-independent and exported as such, so a caller with its own sockets can
+keep the protocol and bring its own transport; CONNECT is the hosted convenience.
+Separate from :seal for the same reason :seal/http is."
+  :version "0.0.1"
+  :author "ynniv"
+  :license "MIT"
+  :depends-on ("seal" "sb-bsd-sockets")
+  :serial t
+  :components ((:module "src" :serial t :components ((:file "websocket")))))
+
 (asdf:defsystem :seal/test
   :depends-on ("seal")
   :components

@@ -13,6 +13,29 @@
 (defparameter *base64-alphabet*
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 
+(defparameter +base64-alphabet+
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+(defun base64-encode (bytes)
+  "Standard base64 (RFC 4648) with padding."
+  (let* ((bytes (coerce bytes '(vector (unsigned-byte 8))))
+         (len (length bytes))
+         (out (make-string (* 4 (ceiling len 3)) :initial-element #\=))
+         (o 0))
+    (loop for i from 0 below len by 3
+          for b0 = (aref bytes i)
+          for b1 = (if (< (+ i 1) len) (aref bytes (+ i 1)) 0)
+          for b2 = (if (< (+ i 2) len) (aref bytes (+ i 2)) 0)
+          for triple = (logior (ash b0 16) (ash b1 8) b2)
+          do (setf (char out o) (char +base64-alphabet+ (ldb (byte 6 18) triple)))
+             (setf (char out (+ o 1)) (char +base64-alphabet+ (ldb (byte 6 12) triple)))
+             (when (< (+ i 1) len)
+               (setf (char out (+ o 2)) (char +base64-alphabet+ (ldb (byte 6 6) triple))))
+             (when (< (+ i 2) len)
+               (setf (char out (+ o 3)) (char +base64-alphabet+ (ldb (byte 6 0) triple))))
+             (incf o 4))
+    out))
+
 (defun base64-decode (string)
   "Decode a standard-alphabet base64 STRING (ignoring whitespace) to bytes."
   (let ((rev (make-array 128 :initial-element -1))

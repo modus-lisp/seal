@@ -36,7 +36,7 @@
    ;; certificate chain verification + trust store
    #:validate-chain #:build-ordered-chain #:verify-cert-signature #:verify-signature
    #:trust-store #:trust-store-p #:make-trust-store-from-pem
-   #:load-system-trust-store #:resolve-trust-store #:pem-certificates #:base64-decode
+   #:load-system-trust-store #:resolve-trust-store #:pem-certificates #:base64-decode #:base64-encode
    ;; transport
    #:make-socket-transport #:transport-send #:transport-recv #:transport-close
    ;; tls connection + public API

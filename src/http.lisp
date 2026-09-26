@@ -19,7 +19,9 @@
            #:response-body #:response-url
            #:request #:http-get #:get-string #:header
            #:parse-url #:url-scheme #:url-host #:url-port #:url-path
-           #:*user-agent* #:*max-redirects* #:http-error #:http-error-status))
+           #:*user-agent* #:*max-redirects* #:http-error #:http-error-status
+           #:open-request #:body-stream #:body-stream-status #:body-stream-headers
+           #:read-body-bytes))
 
 (in-package #:seal.http)
 
@@ -113,40 +115,16 @@
           collect (cons (string-downcase (string-trim " " (subseq line 0 c)))
                         (string-trim " " (subseq line (1+ c))))))
 
-(defun read-n-bytes (stream n)
-  (let ((buf (make-array n :element-type '(unsigned-byte 8))))
-    (let ((got (read-sequence buf stream)))
-      (when (< got n) (fail nil "short body (~d of ~d bytes)" got n)))
-    buf))
+(defparameter *timeout* 30
+  "Seconds a read may wait for the server before the request is abandoned.  Per
+   receive, not per request: a slow stream that keeps producing is never cut off,
+   only one that goes silent.")
 
-(defun read-chunked-body (stream)
-  (let ((out (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-    (loop
-      (let* ((line (crlf-line stream))
-             (semi (and line (position #\; line)))
-             (size (or (ignore-errors (parse-integer line :end semi :radix 16))
-                       (fail nil "bad chunk size ~s" line))))
-        (when (zerop size)
-          (loop for l = (crlf-line stream) while (and l (plusp (length l))))  ; trailers
-          (return))
-        (let ((chunk (read-n-bytes stream size)))
-          (loop for b across chunk do (vector-push-extend b out)))
-        (crlf-line stream)))                              ; CRLF after each chunk
-    (coerce out '(simple-array (unsigned-byte 8) (*)))))
-
-(defun read-to-eof (stream)
-  (let ((out (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
-        (buf (make-array 4096 :element-type '(unsigned-byte 8))))
-    (loop for n = (read-sequence buf stream)
-          while (plusp n)
-          do (dotimes (i n) (vector-push-extend (aref buf i) out))
-          while (= n (length buf)))
-    (coerce out '(simple-array (unsigned-byte 8) (*)))))
-
-(defun open-stream (url)
-  "A byte stream to URL's host: TLS for https, a plain socket for http."
+(defun open-stream (url &key (timeout *timeout*))
+  "A byte stream to URL's host: TLS for https, a plain socket for http.  TIMEOUT
+   bounds each wait for the server, on both paths."
   (if (string= (url-scheme url) "https")
-      (let ((conn (seal:connect (url-host url) (url-port url))))
+      (let ((conn (seal:connect (url-host url) (url-port url) :timeout timeout)))
         (values (seal:make-tls-stream conn) conn))
       (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
                                  :type :stream :protocol :tcp)))
@@ -156,55 +134,207 @@
          (url-port url))
         (values (sb-bsd-sockets:socket-make-stream
                  sock :input t :output t :element-type '(unsigned-byte 8)
-                 :buffering :full)
+                 :buffering :full :timeout timeout)
                 nil))))
 
-(defun one-request (method url headers body)
-  (multiple-value-bind (stream conn) (open-stream url)
-    (declare (ignore conn))
+(defun send-head-and-body (stream method url headers body)
+  "Write the request line, headers and BODY to STREAM."
+  (let* ((req (append (list (cons "Host" (url-host url))
+                            (cons "User-Agent" *user-agent*)
+                            (cons "Accept" "*/*")
+                            ;; We hand back bytes, not a decompressor.
+                            (cons "Accept-Encoding" "identity")
+                            (cons "Connection" "close"))
+                      headers
+                      (when body
+                        (list (cons "Content-Length"
+                                    (princ-to-string (length body)))))))
+         (head (with-output-to-string (s)
+                 (format s "~a ~a HTTP/1.1~c~c" method (url-path url)
+                         #\Return #\Linefeed)
+                 (dolist (h req)
+                   (format s "~a: ~a~c~c" (car h) (cdr h) #\Return #\Linefeed))
+                 (format s "~c~c" #\Return #\Linefeed))))
+    (write-sequence (bytes head) stream)
+    (when body (write-sequence body stream))
+    (finish-output stream)))
+
+(defun read-status-and-headers (stream)
+  "The response's status code and header alist (names downcased)."
+  (let* ((status-line (or (crlf-line stream) (fail nil "no response")))
+         (sp (or (position #\Space status-line)
+                 (fail nil "bad status line ~s" status-line)))
+         (code (or (ignore-errors (parse-integer status-line :start (1+ sp)
+                                                             :end (+ sp 4)))
+                   (fail nil "bad status line ~s" status-line))))
+    (values code (read-headers stream))))
+
+(defun body-framing (method code headers)
+  "How the body is delimited: :NONE, (:LENGTH n), :CHUNKED, or :EOF."
+  (let ((te (cdr (assoc "transfer-encoding" headers :test #'string=)))
+        (cl (cdr (assoc "content-length" headers :test #'string=))))
+    (cond ((or (string-equal method "HEAD")          ; HEAD and 1xx/204/304 carry no
+               (= code 204) (= code 304) (< code 200)) ; body however they are framed
+           :none)
+          ((and te (search "chunked" te)) :chunked)
+          (cl (list :length (parse-integer cl)))
+          (t :eof))))
+
+(defun body-byte-reader (stream framing)
+  "A thunk returning the body's next octet, or NIL once the body is over.  The ONE
+   implementation of HTTP body framing: the whole-body path and the streaming path
+   both read through it, so a chunked stream cannot be decoded two different ways."
+  (let ((left 0) (done nil))
+    (etypecase framing
+      ((member :none) (lambda () nil))
+      ((member :eof)
+       (lambda () (unless done
+                    (let ((b (read-byte stream nil nil)))
+                      (unless b (setf done t))
+                      b))))
+      (cons
+       (setf left (second framing))
+       (lambda () (when (plusp left)
+                    (let ((b (read-byte stream nil nil)))
+                      (if b (progn (decf left) b)
+                          (fail nil "short body (~d bytes missing)" left))))))
+      ((member :chunked)
+       (lambda ()
+         (loop
+           (when done (return nil))
+           (when (plusp left)
+             (let ((b (or (read-byte stream nil nil) (fail nil "chunked body cut off"))))
+               (decf left)
+               (when (zerop left) (crlf-line stream))       ; CRLF after each chunk
+               (return b)))
+           (let* ((line (crlf-line stream))
+                  (semi (and line (position #\; line)))
+                  (size (or (and line (ignore-errors
+                                       (parse-integer line :end semi :radix 16)))
+                            (fail nil "bad chunk size ~s" line))))
+             (if (zerop size)
+                 (progn (loop for l = (crlf-line stream)      ; trailers
+                              while (and l (plusp (length l))))
+                        (setf done t))
+                 (setf left size)))))))))
+
+(defun read-body-bytes (next &optional max)
+  "Drain the thunk NEXT into an octet vector, stopping after MAX octets if given."
+  (let ((out (make-array 4096 :element-type '(unsigned-byte 8)
+                              :adjustable t :fill-pointer 0)))
+    (loop for b = (and (or (null max) (< (fill-pointer out) max)) (funcall next))
+          while b do (vector-push-extend b out))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
+(defun one-request (method url headers body &key (timeout *timeout*) max-body)
+  (let ((stream (open-stream url :timeout timeout)))
     (unwind-protect
-         (let* ((req (append (list (cons "Host" (url-host url))
-                                   (cons "User-Agent" *user-agent*)
-                                   (cons "Accept" "*/*")
-                                   ;; We hand back bytes, not a decompressor.
-                                   (cons "Accept-Encoding" "identity")
-                                   (cons "Connection" "close"))
-                             headers
-                             (when body
-                               (list (cons "Content-Length"
-                                           (princ-to-string (length body)))))))
-                (head (with-output-to-string (s)
-                        (format s "~a ~a HTTP/1.1~c~c" method (url-path url)
-                                #\Return #\Linefeed)
-                        (dolist (h req)
-                          (format s "~a: ~a~c~c" (car h) (cdr h) #\Return #\Linefeed))
-                        (format s "~c~c" #\Return #\Linefeed))))
-           (write-sequence (bytes head) stream)
-           (when body (write-sequence body stream))
-           (finish-output stream)
-           (let ((status-line (or (crlf-line stream) (fail nil "no response"))))
-             (let* ((sp (or (position #\Space status-line)
-                            (fail nil "bad status line ~s" status-line)))
-                    (code (or (ignore-errors (parse-integer status-line :start (1+ sp)
-                                                                        :end (+ sp 4)))
-                              (fail nil "bad status line ~s" status-line)))
-                    (hdrs (read-headers stream))
-                    (te (cdr (assoc "transfer-encoding" hdrs :test #'string=)))
-                    (cl (cdr (assoc "content-length" hdrs :test #'string=)))
-                    ;; HEAD and 1xx/204/304 carry no body however they are framed.
-                    (bodyless (or (string-equal method "HEAD")
-                                  (= code 204) (= code 304) (< code 200)))
-                    (payload (cond (bodyless #())
-                                   ((and te (search "chunked" te)) (read-chunked-body stream))
-                                   (cl (read-n-bytes stream (parse-integer cl)))
-                                   (t (read-to-eof stream)))))
-               (make-response :status code :headers hdrs :body payload
-                              :url (url-string url)))))
+         (progn
+           (send-head-and-body stream method url headers body)
+           (multiple-value-bind (code hdrs) (read-status-and-headers stream)
+             (make-response :status code :headers hdrs
+                            :body (read-body-bytes
+                                   (body-byte-reader stream
+                                                     (body-framing method code hdrs))
+                                   max-body)
+                            :url (url-string url))))
       (ignore-errors (close stream)))))
+
+;;; ---- a response you read as it arrives ----------------------------------------
+;;;
+;;; For a body that is long, endless, or worth acting on before it ends -- a
+;;; server-sent-event stream is all three.  Characters, decoded from UTF-8 a line
+;;; at a time: an LF can never fall inside a multi-byte sequence, so splitting
+;;; there never cuts a character in half, and the line is what a caller reading
+;;; events wants anyway.
+
+(defclass body-stream (sb-gray:fundamental-character-input-stream)
+  ((next    :initarg :next)                          ; the framed byte thunk
+   (raw     :initarg :raw)                           ; the socket or TLS stream, to close
+   (status  :initarg :status  :reader body-stream-status)
+   (headers :initarg :headers :reader body-stream-headers)
+   (buf     :initform "")                            ; the current decoded line
+   (pos     :initform 0)))
+
+(defconstant +line-cap+ 65536
+  "A line longer than this is handed over in pieces, so one enormous unbroken line
+   cannot hold the whole body in memory before any of it is readable.")
+
+(defun %refill (s)
+  "Decode the next line (or +LINE-CAP+ octets of one) into S's buffer.  NIL at end."
+  (with-slots (next buf pos) s
+    (let ((octs (make-array 256 :element-type '(unsigned-byte 8)
+                                :adjustable t :fill-pointer 0)))
+      (loop for b = (funcall next)
+            while b
+            do (vector-push-extend b octs)
+            until (or (= b 10) (>= (fill-pointer octs) +line-cap+)))
+      (when (zerop (fill-pointer octs)) (return-from %refill nil))
+      ;; A cap hit mid-character leaves up to three octets of an incomplete UTF-8
+      ;; sequence; lenient decoding replaces rather than fails, so a pathological
+      ;; line degrades to one replacement character instead of an error.
+      (setf buf (sb-ext:octets-to-string octs :external-format '(:utf-8 :replacement #\?))
+            pos 0)
+      t)))
+
+(defmethod sb-gray:stream-read-char ((s body-stream))
+  (with-slots (buf pos) s
+    (when (and (>= pos (length buf)) (not (%refill s)))
+      (return-from sb-gray:stream-read-char :eof))
+    (prog1 (char buf pos) (incf pos))))
+
+(defmethod sb-gray:stream-unread-char ((s body-stream) ch)
+  (declare (ignore ch))
+  (with-slots (pos) s (when (plusp pos) (decf pos)))
+  nil)
+
+(defmethod sb-gray:stream-read-line ((s body-stream))
+  "Whole lines at once -- the path an event reader takes, so it does not go through
+   STREAM-READ-CHAR per character."
+  (with-slots (buf pos) s
+    (let ((acc nil))
+      (loop
+        (when (and (>= pos (length buf)) (not (%refill s)))
+          (return (if acc
+                      (values (apply #'concatenate 'string (nreverse acc)) t)
+                      (values "" t))))
+        (let ((nl (position #\Newline buf :start pos)))
+          (if nl
+              (let ((piece (subseq buf pos nl)))
+                (setf pos (1+ nl))
+                (push piece acc)
+                (return (values (string-right-trim '(#\Return)
+                                                   (apply #'concatenate 'string
+                                                          (nreverse acc)))
+                                nil)))
+              (progn (push (subseq buf pos) acc)
+                     (setf pos (length buf)))))))))
+
+(defmethod close ((s body-stream) &key abort)
+  (declare (ignore abort))
+  (with-slots (raw) s (ignore-errors (close raw)))
+  t)
+
+(defun open-request (method url &key headers body (timeout *timeout*))
+  "Send METHOD to URL and return a BODY-STREAM positioned at the start of the body,
+   after the status and headers have been read (BODY-STREAM-STATUS, -HEADERS).  The
+   caller reads it as characters and must CLOSE it.
+
+   Does NOT follow redirects: a stream is handed back the moment the headers are in,
+   and following would mean deciding before the caller has seen them."
+  (let* ((u (if (url-p url) url (parse-url url)))
+         (stream (open-stream u :timeout timeout)))
+    (handler-bind ((error (lambda (e) (declare (ignore e)) (ignore-errors (close stream)))))
+      (send-head-and-body stream method u headers body)
+      (multiple-value-bind (code hdrs) (read-status-and-headers stream)
+        (make-instance 'body-stream
+                       :next (body-byte-reader stream (body-framing method code hdrs))
+                       :raw stream :status code :headers hdrs)))))
 
 ;;; ---- the public API ---------------------------------------------------------
 
-(defun request (method url &key headers body (max-redirects *max-redirects*))
+(defun request (method url &key headers body (max-redirects *max-redirects*)
+                                (timeout *timeout*) max-body)
   "Perform METHOD against URL, following up to MAX-REDIRECTS 3xx hops.  Returns a
    RESPONSE; RESPONSE-URL is where it finally landed.
 
@@ -215,7 +345,8 @@
         (method method)
         (body body))
     (loop for hop from 0 to max-redirects
-          do (let* ((r (one-request method current headers body))
+          do (let* ((r (one-request method current headers body
+                                    :timeout timeout :max-body max-body))
                     (code (response-status r))
                     (location (header r "location")))
                (cond

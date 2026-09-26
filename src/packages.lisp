@@ -2,7 +2,15 @@
 
 (defpackage #:seal
   (:use #:cl)
+  ;; Gray streams, from whichever package this implementation provides them in -- the
+  ;; protocol is identical, only the home differs.  See port.lisp.
+  (:import-from #+sbcl #:sb-gray #+(and modus (not sbcl)) #:gray-streams
+                #:fundamental-binary-input-stream #:fundamental-binary-output-stream
+                #:stream-read-byte #:stream-read-sequence #:stream-write-byte
+                #:stream-write-sequence #:stream-force-output #:stream-finish-output)
   (:export
+   ;; portability (port.lisp)
+   #:utf8-encode #:utf8-decode #:wait-readable
    ;; hashes
    #:sha1 #:sha256 #:sha384 #:sha512
    #:sha1-init #:sha1-update #:sha1-final    ; streaming SHA-1

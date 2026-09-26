@@ -55,7 +55,7 @@ seconds."
              (lambda ()
                ;; Wait up to TIMEOUT seconds for the socket to become readable,
                ;; then pull whatever bytes are available.
-               (if (sb-sys:wait-until-fd-usable fd :input timeout)
+               (if (wait-readable fd timeout)
                    (let ((buf (make-array 16384 :element-type '(unsigned-byte 8))))
                      (handler-case
                          (multiple-value-bind (data len)

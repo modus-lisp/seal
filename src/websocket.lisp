@@ -68,9 +68,8 @@
 
 (defun open-p (ws) (eq (websocket-state ws) :open))
 
-(defun utf8 (s) (sb-ext:string-to-octets s :external-format :utf-8))
-(defun from-utf8 (b) (sb-ext:octets-to-string (coerce b '(vector (unsigned-byte 8)))
-                                              :external-format :utf-8))
+(defun utf8 (s) (seal:utf8-encode s))
+(defun from-utf8 (b) (seal:utf8-decode (coerce b '(vector (unsigned-byte 8)))))
 
 ;;; ---- framing (transport-independent) ----------------------------------------
 

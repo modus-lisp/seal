@@ -17,6 +17,7 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
     :serial t
     :components
     ((:file "packages")
+     (:file "port")            ; the few implementation-specific spots, gathered in one file
      (:file "conditions")
      (:module "crypto"
       :serial t

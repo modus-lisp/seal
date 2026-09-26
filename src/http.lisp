@@ -15,6 +15,9 @@
 
 (defpackage #:seal.http
   (:use #:cl)
+  (:import-from #+sbcl #:sb-gray #+(and modus (not sbcl)) #:gray-streams
+                #:fundamental-character-input-stream
+                #:stream-read-char #:stream-unread-char #:stream-read-line)
   (:export #:response #:response-p #:response-status #:response-headers
            #:response-body #:response-url
            #:request #:http-get #:get-string #:header
@@ -96,7 +99,7 @@
 ;;; ---- wire I/O ---------------------------------------------------------------
 
 (defun ascii (bytes) (map 'string #'code-char bytes))
-(defun bytes (string) (sb-ext:string-to-octets string :external-format :utf-8))
+(defun bytes (string) (seal:utf8-encode string))
 
 (defun crlf-line (stream)
   "One CRLF-terminated line as a string, CRLF stripped; NIL at end of stream."
@@ -248,7 +251,7 @@
 ;;; there never cuts a character in half, and the line is what a caller reading
 ;;; events wants anyway.
 
-(defclass body-stream (sb-gray:fundamental-character-input-stream)
+(defclass body-stream (fundamental-character-input-stream)
   ((next    :initarg :next)                          ; the framed byte thunk
    (raw     :initarg :raw)                           ; the socket or TLS stream, to close
    (status  :initarg :status  :reader body-stream-status)
@@ -273,22 +276,22 @@
       ;; A cap hit mid-character leaves up to three octets of an incomplete UTF-8
       ;; sequence; lenient decoding replaces rather than fails, so a pathological
       ;; line degrades to one replacement character instead of an error.
-      (setf buf (sb-ext:octets-to-string octs :external-format '(:utf-8 :replacement #\?))
+      (setf buf (seal:utf8-decode octs)
             pos 0)
       t)))
 
-(defmethod sb-gray:stream-read-char ((s body-stream))
+(defmethod stream-read-char ((s body-stream))
   (with-slots (buf pos) s
     (when (and (>= pos (length buf)) (not (%refill s)))
-      (return-from sb-gray:stream-read-char :eof))
+      (return-from stream-read-char :eof))
     (prog1 (char buf pos) (incf pos))))
 
-(defmethod sb-gray:stream-unread-char ((s body-stream) ch)
+(defmethod stream-unread-char ((s body-stream) ch)
   (declare (ignore ch))
   (with-slots (pos) s (when (plusp pos) (decf pos)))
   nil)
 
-(defmethod sb-gray:stream-read-line ((s body-stream))
+(defmethod stream-read-line ((s body-stream))
   "Whole lines at once -- the path an event reader takes, so it does not go through
    STREAM-READ-CHAR per character."
   (with-slots (buf pos) s
@@ -367,5 +370,9 @@
   (let ((r (request "GET" url :headers headers)))
     (unless (<= 200 (response-status r) 299)
       (fail (response-status r) "GET ~a" (if (url-p url) (url-string url) url)))
-    (sb-ext:octets-to-string (coerce (response-body r) '(vector (unsigned-byte 8)))
-                             :external-format external-format)))
+    (let ((octets (coerce (response-body r) '(vector (unsigned-byte 8)))))
+      (if (eq external-format :utf-8)
+          (seal:utf8-decode octets)
+          ;; another encoding needs the implementation's own tables; UTF-8 needs nothing
+          #+sbcl (sb-ext:octets-to-string octets :external-format external-format)
+          #-sbcl (error "get-string: only :UTF-8 is portable, not ~s" external-format)))))

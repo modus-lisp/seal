@@ -30,7 +30,8 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
        (:file "gcm")
        (:file "bigint")
        (:file "rsa")
-       (:file "ecdsa")))
+       (:file "ecdsa")
+       (:file "ecmont")))    ; fixnum-limb P-256/P-384 for implementations with slow bignums
      (:file "x509")
      (:file "verify")
      (:file "transport")

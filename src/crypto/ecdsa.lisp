@@ -12,6 +12,8 @@
 
 (defstruct (ec-curve (:conc-name ec-)) p a b gx gy n name)
 
+(defvar *ec-fast-p*)   ; defined in ecmont.lisp
+
 (defun ec-hex (s) (parse-integer (remove #\Space s) :radix 16))
 
 (defparameter *p256*
@@ -169,10 +171,12 @@ PUBLIC-POINT is (cons x y). HASH is the raw digest byte vector."
            (w (mod-inverse s n))
            (u1 (mod (* e w) n))
            (u2 (mod (* r w) n))
-           (point (ec-double-scalar-mult
-                   curve
-                   u1 (cons (ec-gx curve) (ec-gy curve))
-                   u2 public-point)))
+           (point (funcall (if *ec-fast-p*
+                               'ec-double-scalar-mult-fast
+                               'ec-double-scalar-mult)
+                           curve
+                           u1 (cons (ec-gx curve) (ec-gy curve))
+                           u2 public-point)))
       (and (not (ec-infinity-p point))
            (= (mod (car point) n) r)))))
 

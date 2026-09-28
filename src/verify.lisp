@@ -47,7 +47,11 @@
           for code = (char-code ch)
           for v = (and (< code 128) (aref rev code))
           when (and v (>= v 0)) do
-            (setf bits (logior (ash bits 6) v))
+            ;; Only the low (nbits + 6 <= 14) bits are ever read: keep just
+            ;; those.  Unmasked, BITS held the whole decoded stream -- a
+            ;; 12000-bit bignum shifted once per character, quadratic, and
+            ;; 11 s for the system CA bundle where bignums are slow.
+            (setf bits (logand (logior (ash bits 6) v) #xffff))
             (incf nbits 6)
             (when (>= nbits 8)
               (decf nbits 8)
@@ -102,12 +106,25 @@
     (dolist (der (pem-certificates text) store)
       (trust-store-add store der))))
 
+(defvar *system-trust-store-cache* nil
+  "(path write-date . store) of the last system bundle parsed.  Parsing ~140
+   certificates on every connection is waste on any implementation and a
+   visible stall on a slow one; the bundle changes on package upgrades, so the
+   cache is keyed on the file's write date.")
+
 (defun load-system-trust-store ()
-  "Load the first available system CA bundle. Signals if none is found."
+  "Load the first available system CA bundle (cached while the file is
+   unchanged). Signals if none is found."
   (dolist (path *system-ca-bundles*)
-    (let ((text (read-file-string path)))
-      (when (and text (search "BEGIN CERTIFICATE" text))
-        (return-from load-system-trust-store (make-trust-store-from-pem text)))))
+    (let ((date (ignore-errors (file-write-date path)))
+          (cached *system-trust-store-cache*))
+      (when (and date cached (equal (first cached) path) (eql (second cached) date))
+        (return-from load-system-trust-store (cddr cached)))
+      (let ((text (read-file-string path)))
+        (when (and text (search "BEGIN CERTIFICATE" text))
+          (let ((store (make-trust-store-from-pem text)))
+            (when date (setf *system-trust-store-cache* (list* path date store)))
+            (return-from load-system-trust-store store))))))
   (error 'tls-certificate-error
          :message "no system CA bundle found; supply :trust-store"))
 

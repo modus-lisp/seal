@@ -57,6 +57,9 @@
                     :one (%ecm-int->limbs (mod r p) n))))
 
 (defvar *ecm-fields* nil)
+#+modus ; per computation on modus: threads and actors share no state
+(let ((reg (find-symbol "REGISTER-PER-COMPUTATION-SPECIAL" "COMMON-LISP-USER")))
+  (when (and reg (fboundp reg)) (funcall reg '*ecm-fields*)))
 (defun %ecm-field-for (p)
   (or (cdr (assoc p *ecm-fields*))
       (let ((f (%ecm-make-field p)))

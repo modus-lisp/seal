@@ -190,6 +190,9 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
 ;;; concurrent writers.
 (defvar *gcm-key-cache* nil
   "Most recent (KEY-COPY EXPANDED ROUNDS H) tuple, or NIL.")
+#+modus ; per computation on modus: threads and actors share no state
+(let ((reg (find-symbol "REGISTER-PER-COMPUTATION-SPECIAL" "COMMON-LISP-USER")))
+  (when (and reg (fboundp reg)) (funcall reg '*gcm-key-cache*)))
 
 (defun %gcm-prepare-key (key)
   "Return (values EXPANDED ROUNDS H) for KEY, caching the last one used."

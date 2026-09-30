@@ -111,19 +111,35 @@
    certificates on every connection is waste on any implementation and a
    visible stall on a slow one; the bundle changes on package upgrades, so the
    cache is keyed on the file's write date.")
+(defvar *system-trust-store-local* nil
+  "This computation's own (path write-date . store), used when the shared
+   cache above could not be filled from here: on modus a thread or actor may
+   read shared memory but not store its own objects into it, so a worker that
+   finds the shared cache empty parses into this one instead.")
+#+modus ; per computation on modus: threads and actors share no state
+(let ((reg (find-symbol "REGISTER-PER-COMPUTATION-SPECIAL" "COMMON-LISP-USER")))
+  (when (and reg (fboundp reg)) (funcall reg '*system-trust-store-local*)))
+
+(defun %cached-store (cached path date)
+  (and date cached (equal (first cached) path) (eql (second cached) date) (cddr cached)))
 
 (defun load-system-trust-store ()
   "Load the first available system CA bundle (cached while the file is
-   unchanged). Signals if none is found."
+   unchanged). Signals if none is found.  The parsed store is immutable, so it
+   is shared when the implementation lets this thread publish it (on modus,
+   the main thread) and kept per computation otherwise."
   (dolist (path *system-ca-bundles*)
-    (let ((date (ignore-errors (file-write-date path)))
-          (cached *system-trust-store-cache*))
-      (when (and date cached (equal (first cached) path) (eql (second cached) date))
-        (return-from load-system-trust-store (cddr cached)))
+    (let ((date (ignore-errors (file-write-date path))))
+      (let ((hit (or (%cached-store *system-trust-store-cache* path date)
+                     (%cached-store *system-trust-store-local* path date))))
+        (when hit (return-from load-system-trust-store hit)))
       (let ((text (read-file-string path)))
         (when (and text (search "BEGIN CERTIFICATE" text))
           (let ((store (make-trust-store-from-pem text)))
-            (when date (setf *system-trust-store-cache* (list* path date store)))
+            (when date
+              (let ((entry (list* path date store)))
+                (unless (ignore-errors (setf *system-trust-store-cache* entry) t)
+                  (setf *system-trust-store-local* entry))))
             (return-from load-system-trust-store store))))))
   (error 'tls-certificate-error
          :message "no system CA bundle found; supply :trust-store"))
@@ -170,14 +186,40 @@ Returns T / NIL. Any unsupported combination fails closed (NIL)."
         (t nil))
     (error () nil)))
 
+(defvar *verified-signatures* nil
+  "SHA-256 digests of (child TBS, child signature, parent SPKI) triples whose
+   signature has verified in this computation.  A certificate signature check
+   is a pure function of those bytes, so a repeat connection to the same host
+   need not redo the public-key arithmetic -- dates, hostname and CA
+   constraints are still checked on every connection.  Bounded at 256.")
+#+modus ; per computation on modus: threads and actors share no state
+(let ((reg (find-symbol "REGISTER-PER-COMPUTATION-SPECIAL" "COMMON-LISP-USER")))
+  (when (and reg (fboundp reg)) (funcall reg '*verified-signatures*)))
+
+(defun %signature-key (child parent)
+  (sha256 (concatenate '(vector (unsigned-byte 8))
+                       (certificate-tbs-der child)
+                       (certificate-signature child)
+                       (certificate-spki-bytes parent))))
+
+(defun certificate-spki-bytes (cert)
+  (spki-raw (certificate-spki cert)))
+
 (defun verify-cert-signature (child parent)
   "True if CHILD's signature verifies under PARENT's public key."
-  (verify-signature (certificate-spki parent)
-                    (certificate-sig-scheme child)
-                    (certificate-sig-hash child)
-                    (certificate-sig-salt child)
-                    (certificate-tbs-der child)
-                    (certificate-signature child)))
+  (let ((key (%signature-key child parent)))
+    (or (and (member key *verified-signatures* :test #'equalp) t)
+        (when (verify-signature (certificate-spki parent)
+                                (certificate-sig-scheme child)
+                                (certificate-sig-hash child)
+                                (certificate-sig-salt child)
+                                (certificate-tbs-der child)
+                                (certificate-signature child))
+          (setf *verified-signatures*
+                (cons key (if (> (length *verified-signatures*) 255)
+                              (subseq *verified-signatures* 0 255)
+                              *verified-signatures*)))
+          t))))
 
 ;;; ---- chain building & validation -------------------------------------------
 

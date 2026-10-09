@@ -71,6 +71,24 @@ seconds."
         (error 'tls-error :message (format nil "connect to ~a:~a failed: ~a"
                                            host port e))))))
 
+(defun make-stream-transport (stream closer)
+  "Wrap a binary STREAM (and a CLOSER thunk) as a TRANSPORT, for a connection seal
+   did not open itself -- a proxy, an overlay network, anything that hands back a
+   stream.  The receiver blocks for one byte, then takes what else is ready."
+  (%make-transport
+   :sender (lambda (bytes) (write-sequence bytes stream) (finish-output stream) t)
+   :receiver (lambda ()
+               (let ((b (handler-case (read-byte stream nil nil) (error () nil))))
+                 (when b
+                   (let ((out (make-array 16 :element-type '(unsigned-byte 8)
+                                             :adjustable t :fill-pointer 0)))
+                     (vector-push-extend b out)
+                     (loop while (and (< (length out) 16384) (ignore-errors (listen stream)))
+                           do (let ((n (read-byte stream nil nil)))
+                                (if n (vector-push-extend n out) (return))))
+                     (coerce out '(simple-array (unsigned-byte 8) (*)))))))
+   :closer (lambda () (ignore-errors (funcall closer)))))
+
 (defun %resolve (host)
   "Resolve HOST to a 4-byte IPv4 address vector."
   (or (%parse-dotted-quad host)

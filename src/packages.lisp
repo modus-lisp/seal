@@ -46,7 +46,7 @@
    #:trust-store #:trust-store-p #:make-trust-store-from-pem
    #:load-system-trust-store #:resolve-trust-store #:pem-certificates #:base64-decode #:base64-encode
    ;; transport
-   #:make-socket-transport #:transport-send #:transport-recv #:transport-close
+   #:make-socket-transport #:make-stream-transport #:transport-send #:transport-recv #:transport-close
    ;; tls connection + public API
    #:connect #:tls-send #:tls-recv #:tls-close #:*progress*
    #:tls-connection #:tls-connection-p

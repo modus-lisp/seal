@@ -22,7 +22,7 @@
            #:response-body #:response-url
            #:request #:http-get #:get-string #:header
            #:parse-url #:url-scheme #:url-host #:url-port #:url-path
-           #:*user-agent* #:*max-redirects* #:http-error #:http-error-status
+           #:*user-agent* #:*max-redirects* #:*dial* #:http-error #:http-error-status
            #:open-request #:body-stream #:body-stream-status #:body-stream-headers
            #:read-body-bytes))
 
@@ -123,9 +123,24 @@
    receive, not per request: a slow stream that keeps producing is never cut off,
    only one that goes silent.")
 
+(defvar *dial* nil
+  "How to reach a host, or NIL for a direct TCP socket.  A function of (HOST PORT
+   TIMEOUT) returning (values binary-stream closer-thunk) -- the shape of
+   cl-transport's DIAL, so a caller can send requests over a proxy or an overlay:
+     (let ((seal.http:*dial* (lambda (h p tm) (cl-transport:dial h p :transport :tor :timeout tm))))
+       (seal.http:get-string \"https://example.com/\"))")
+
 (defun open-stream (url &key (timeout *timeout*))
   "A byte stream to URL's host: TLS for https, a plain socket for http.  TIMEOUT
    bounds each wait for the server, on both paths."
+  (when *dial*
+    (multiple-value-bind (stream closer) (funcall *dial* (url-host url) (url-port url) timeout)
+      (return-from open-stream
+        (if (string= (url-scheme url) "https")
+            (let ((conn (seal:connect (url-host url) (url-port url) :timeout timeout
+                                      :transport (seal:make-stream-transport stream closer))))
+              (values (seal:make-tls-stream conn) conn))
+            (values stream nil)))))
   (if (string= (url-scheme url) "https")
       (let ((conn (seal:connect (url-host url) (url-port url) :timeout timeout)))
         (values (seal:make-tls-stream conn) conn))

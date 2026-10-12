@@ -17,5 +17,5 @@
 (asdf:load-system :seal/test)
 
 (in-package #:seal)
-(let ((failures (+ (run-vectors) (run-negative-tests) (run-tls12) (run-live))))
+(let ((failures (+ (run-vectors) (if (run-hpke-vectors) 0 1) (run-negative-tests) (run-tls12) (run-live))))
   (sb-ext:exit :code (if (zerop failures) 0 1)))

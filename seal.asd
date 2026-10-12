@@ -28,6 +28,7 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
        (:file "hkdf")
        (:file "aes")
        (:file "gcm")
+       (:file "hpke")          ; RFC 9180 base mode: DHKEM(X25519)/HKDF-SHA256/AES-256-GCM (Tinfoil EHBP)
        (:file "bigint")
        (:file "rsa")
        (:file "ecdsa")
@@ -75,6 +76,7 @@ Separate from :seal for the same reason :seal/http is."
     :components
     ((:file "util")
      (:file "vectors")
+     (:file "hpke")
      (:file "negatives")
      (:file "tls12")
      (:file "live")

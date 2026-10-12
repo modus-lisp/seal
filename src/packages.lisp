@@ -27,6 +27,10 @@
    #:chacha20-poly1305-encrypt #:chacha20-poly1305-decrypt
    ;; key agreement
    #:x25519 #:x25519-public-key
+   ;; hpke (RFC 9180 base mode, DHKEM(X25519)/HKDF-SHA256/AES-256-GCM)
+   #:hpke-generate-keypair #:hpke-encap #:hpke-decap
+   #:hpke-setup-sender #:hpke-setup-recipient #:hpke-seal #:hpke-open
+   #:hpke-base-seal #:hpke-context-p
    ;; signature verification
    #:rsa-public-key #:make-rsa-public-key #:rsa-n #:rsa-e
    #:rsa-pkcs1-verify #:rsa-pss-verify

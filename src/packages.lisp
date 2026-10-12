@@ -34,6 +34,9 @@
    ;; ehbp (Tinfoil's Encrypted HTTP Body Protocol framing)
    #:ehbp-seal-request #:ehbp-request-enc #:ehbp-request-body #:ehbp-request-context
    #:ehbp-response-keys #:ehbp-open-response
+   #:ehbp-key-config #:ehbp-key-config-p #:ehbp-key-config-key-id #:ehbp-key-config-kem-id
+   #:ehbp-key-config-public-key #:ehbp-key-config-symmetric
+   #:ehbp-parse-key-config #:ehbp-select-suite
    ;; signature verification
    #:rsa-public-key #:make-rsa-public-key #:rsa-n #:rsa-e
    #:rsa-pkcs1-verify #:rsa-pss-verify

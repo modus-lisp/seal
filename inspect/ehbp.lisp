@@ -12,6 +12,21 @@
 
 (defun run-ehbp-checks ()
   (let ((p0 *pass*) (f0 *fail*))
+    ;; Key config as served by inference.tinfoil.sh/.well-known/hpke-keys (41 bytes,
+    ;; captured live): key_id 0, kem 0x0020, pk, symmetric (0001,0002).
+    (let* ((kc (unhex (concatenate 'string "00" "0020"
+                                   "b754e0ac8422958db567022693fa8b8de6453c5493921b6b8508d671bacb0243"
+                                   "0004" "0001" "0002")))
+           (cfg (ehbp-parse-key-config kc)))
+      (check "EHBP key config kem"
+             (if (= (ehbp-key-config-kem-id cfg) #x0020) "ok" "bad") "ok")
+      (check "EHBP key config pk len"
+             (if (= (length (ehbp-key-config-public-key cfg)) 32) "ok" "bad") "ok")
+      (check "EHBP key config pk bytes"
+             (ehbp-key-config-public-key cfg)
+             (unhex "b754e0ac8422958db567022693fa8b8de6453c5493921b6b8508d671bacb0243"))
+      (check "EHBP key config suite selects AES-256-GCM"
+             (if (= (cdr (ehbp-select-suite cfg)) #x0002) "ok" "bad") "ok"))
     (let* ((*hpke-aead-id* 2) (*hpke-nk* 32)
            (pke (unhex "37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431"))
            (skr (unhex "4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8"))

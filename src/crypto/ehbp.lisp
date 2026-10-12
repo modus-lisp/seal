@@ -52,6 +52,45 @@ Returns (values key nonce-base)."
          (nonce-base (hkdf-expand prk (%hpke-ascii "nonce") 12 :sha256)))
     (values key nonce-base)))
 
+;;; Key configuration (RFC 9458 section 3, media type application/ohttp-keys), as
+;;; served at /.well-known/hpke-keys.  One KeyConfig:
+;;;   key_id u8 | kem_id u16 | public_key (Npk bytes) | symmetric_algorithms (u16 len,
+;;;   then (kdf_id u16, aead_id u16) pairs)
+(defstruct ehbp-key-config key-id kem-id public-key symmetric)
+
+(defun ehbp-parse-key-config (octets)
+  "Parse one application/ohttp-keys KeyConfig. Signals an error on any malformed or
+trailing bytes. Returns an EHBP-KEY-CONFIG whose SYMMETRIC is a list of (kdf . aead)."
+  (let* ((v (coerce octets '(simple-array (unsigned-byte 8) (*))))
+         (n (length v)))
+    (labels ((u8 (p) (aref v p))
+             (u16 (p) (logior (ash (aref v p) 8) (aref v (1+ p)))))
+      (when (< n 3) (error "EHBP key config: too short"))
+      (let* ((key-id (u8 0))
+             (kem (u16 1))
+             (npk 32))
+        (unless (= kem #x0020)
+          (error "EHBP key config: unsupported KEM 0x~4,'0x (need 0x0020)" kem))
+        (when (< n (+ 3 npk 2)) (error "EHBP key config: truncated public key"))
+        (let* ((pk (subseq v 3 (+ 3 npk)))
+               (slen (u16 (+ 3 npk)))
+               (sstart (+ 3 npk 2)))
+          (unless (= n (+ sstart slen))
+            (error "EHBP key config: length mismatch (~a bytes, expected ~a)" n (+ sstart slen)))
+          (unless (and (plusp slen) (zerop (mod slen 4)))
+            (error "EHBP key config: malformed symmetric algorithm list"))
+          (make-ehbp-key-config
+           :key-id key-id :kem-id kem :public-key pk
+           :symmetric (loop for p from sstart below n by 4
+                            collect (cons (u16 p) (u16 (+ p 2))))))))))
+
+(defun ehbp-select-suite (config)
+  "Return the CONFIG's symmetric pair for this project's suite (HKDF-SHA256, AES-256-GCM),
+or signal an error if it is not offered."
+  (or (find-if (lambda (s) (and (= (car s) #x0001) (= (cdr s) #x0002)))
+               (ehbp-key-config-symmetric config))
+      (error "EHBP key config: server does not offer HKDF-SHA256 + AES-256-GCM")))
+
 (defun %ehbp-nonce (nonce-base seq)
   "nonce_base XOR seq, with seq big-endian in the last 8 bytes."
   (let ((n (copy-seq nonce-base)))

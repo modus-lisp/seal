@@ -80,9 +80,10 @@
     (%hpke-kem-shared-secret dh (%hpke-bytes enc pk-r))))
 
 (defstruct hpke-context
-  key        ; 32-byte AES-256 key
-  base-nonce ; 12 bytes
-  (seq 0))   ; message counter
+  key             ; AEAD key
+  base-nonce      ; 12 bytes
+  exporter-secret ; Nh bytes, for Export (RFC 9180 section 5.3)
+  (seq 0))        ; message counter
 
 (defun %hpke-key-schedule (shared-secret info)
   "RFC 9180 KeySchedule for base mode. Returns an HPKE-CONTEXT."
@@ -93,8 +94,15 @@
                            psk-id-hash info-hash))
          (secret (%hpke-labeled-extract suite shared-secret "secret" #()))
          (key (%hpke-labeled-expand suite secret "key" ksc *hpke-nk*))
-         (base-nonce (%hpke-labeled-expand suite secret "base_nonce" ksc +hpke-nn+)))
-    (make-hpke-context :key key :base-nonce base-nonce :seq 0)))
+         (base-nonce (%hpke-labeled-expand suite secret "base_nonce" ksc +hpke-nn+))
+         (exporter-secret (%hpke-labeled-expand suite secret "exp" ksc +hpke-nh+)))
+    (make-hpke-context :key key :base-nonce base-nonce
+                       :exporter-secret exporter-secret :seq 0)))
+
+(defun hpke-export (ctx exporter-context length)
+  "RFC 9180 section 5.3 Export: LabeledExpand(exporter_secret, \"sec\", ctx, L)."
+  (%hpke-labeled-expand (%hpke-suite-id) (hpke-context-exporter-secret ctx)
+                        "sec" exporter-context length))
 
 (defun hpke-setup-sender (pk-r info)
   "SetupBaseS. Returns (values context enc)."

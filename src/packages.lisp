@@ -30,7 +30,10 @@
    ;; hpke (RFC 9180 base mode, DHKEM(X25519)/HKDF-SHA256/AES-256-GCM)
    #:hpke-generate-keypair #:hpke-encap #:hpke-decap
    #:hpke-setup-sender #:hpke-setup-recipient #:hpke-seal #:hpke-open
-   #:hpke-base-seal #:hpke-context-p
+   #:hpke-base-seal #:hpke-context-p #:hpke-export
+   ;; ehbp (Tinfoil's Encrypted HTTP Body Protocol framing)
+   #:ehbp-seal-request #:ehbp-request-enc #:ehbp-request-body #:ehbp-request-context
+   #:ehbp-response-keys #:ehbp-open-response
    ;; signature verification
    #:rsa-public-key #:make-rsa-public-key #:rsa-n #:rsa-e
    #:rsa-pkcs1-verify #:rsa-pss-verify

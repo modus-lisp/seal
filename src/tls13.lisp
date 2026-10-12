@@ -610,8 +610,16 @@ with the leaf certificate's public key. Raises on failure."
     (let ((data (transport-recv transport)))
       (unless data (error 'tls-error :message "no response to ClientHello"))
       (setf recv-buffer data))
-    (multiple-value-bind (record remaining) (extract-record recv-buffer)
-      (unless record (error 'tls-error :message "incomplete ServerHello record"))
+    ;; A TCP read may return only part of the ServerHello record; keep reading until
+    ;; the whole record is buffered rather than treating a short read as an error.
+    (multiple-value-bind (record remaining)
+        (loop
+          (multiple-value-bind (rec rest) (extract-record recv-buffer)
+            (when rec (return (values rec rest)))
+            (let ((more (transport-recv transport)))
+              (unless more (error 'tls-error :message "incomplete ServerHello record"))
+              (setf recv-buffer (concatenate '(vector (unsigned-byte 8))
+                                             recv-buffer more)))))
       (setf recv-buffer remaining)
       (let ((ctype (aref record 0)))
         (when (= ctype +content-alert+)

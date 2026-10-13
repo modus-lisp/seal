@@ -631,7 +631,17 @@ with the leaf certificate's public key. Raises on failure."
             (error 'tls-error :message (format nil "expected ServerHello, got ~d" (aref hs 0))))
           (let ((msg-len (bytes-u24 hs 1)))
             (parse-server-hello conn (subseq hs 4 (+ 4 msg-len)))
-            (add-to-transcript conn (subseq hs 0 (+ 4 msg-len)))))))
+            (add-to-transcript conn (subseq hs 0 (+ 4 msg-len)))
+            ;; The rest of THIS record: a TLS 1.2 server may coalesce its whole
+            ;; flight (ServerHello, Certificate, ServerKeyExchange,
+            ;; ServerHelloDone) into one record -- AMD's KDS does.  Those
+            ;; messages were dropped here, and the TLS 1.2 path then waited for
+            ;; them until the read timed out.  Hand them on as a record of
+            ;; their own, ahead of anything read beyond this one.
+            (when (> (length hs) (+ 4 msg-len))
+              (setf recv-buffer
+                    (buffer-append (make-record +content-handshake+ (subseq hs (+ 4 msg-len)))
+                                   recv-buffer)))))))
     ;; 3. continue on the negotiated version's path. TLS 1.3 keeps the RFC 8446
     ;;    key schedule and encrypted flight; TLS 1.2 runs its own ECDHE exchange
     ;;    (see tls12.lisp).

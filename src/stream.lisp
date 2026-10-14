@@ -25,6 +25,13 @@
             (progn (setf in-buffer nil) (return-from %stream-fill nil)))))
     t))
 
+(defun tls-stream-pending-p (stream)
+  "True when reading STREAM can proceed without waiting: bytes left in its own
+buffer, or the connection under it has input pending (INPUT-PENDING-P)."
+  (with-slots (connection in-buffer in-pos) stream
+    (or (and in-buffer (< in-pos (length in-buffer)))
+        (input-pending-p connection))))
+
 (defmethod stream-read-byte ((stream tls-stream))
   (if (%stream-fill stream)
       (with-slots (in-buffer in-pos) stream

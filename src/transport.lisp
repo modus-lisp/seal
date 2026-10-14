@@ -17,6 +17,7 @@
   (when *progress* (ignore-errors (funcall *progress* phase detail))))
 
 (defstruct (transport (:constructor %make-transport))
+  (fd nil)    ; the socket's descriptor, for INPUT-PENDING-P; NIL when there is none
   sender      ; (lambda (byte-vector) -> t/nil)   push bytes to the peer
   receiver    ; (lambda () -> byte-vector | nil)   pull up-to-N bytes, nil on EOF/timeout
   closer)     ; (lambda () -> nil)                 release the connection
@@ -46,6 +47,7 @@ seconds."
           (sb-bsd-sockets:socket-connect socket address port)
           (let ((fd (sb-bsd-sockets:socket-file-descriptor socket)))
             (%make-transport
+             :fd fd
              :sender
              (lambda (bytes)
                (let ((buf (coerce bytes '(simple-array (unsigned-byte 8) (*)))))

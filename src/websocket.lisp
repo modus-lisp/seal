@@ -30,7 +30,7 @@
   (:nicknames #:seal.ws)
   (:export #:connect #:websocket #:websocket-p #:websocket-stream #:open-p
            #:send-text #:send-binary #:send-ping #:send-pong #:close-socket
-           #:receive #:receive-text
+           #:receive #:receive-text #:pending-p
            ;; the protocol half, for callers bringing their own transport
            #:build-frame #:read-frame #:handshake-request #:check-accept
            #:+text+ #:+binary+ #:+close+ #:+ping+ #:+pong+ #:+continuation+
@@ -236,14 +236,19 @@
   (setf (websocket-state ws) :closed)
   t)
 
-(defun receive (ws)
+(defun receive (ws &key (wait t))
   "Next application message.  Returns (values PAYLOAD OPCODE), or NIL once closed.
 
    Control frames are handled here rather than handed up: a ping is answered
    immediately and a close is honoured, because a caller that has to remember to
-   do that will eventually forget and the connection will die quietly."
+   do that will eventually forget and the connection will die quietly.
+
+   With :WAIT NIL it reads a frame only while input is pending (PENDING-P), and
+   returns (values NIL :PENDING) as soon as none is -- so a ping, answered, does
+   not leave a one-thread pump blocked waiting for the next frame."
   (loop
     (unless (member (websocket-state ws) '(:open :closing)) (return nil))
+    (unless (or wait (pending-p ws)) (return (values nil :pending)))
     (multiple-value-bind (fin opcode payload)
         (handler-case (read-frame (websocket-stream ws))
           (error () (setf (websocket-state ws) :closed) (return nil)))
@@ -272,8 +277,24 @@
     (setf (websocket-fragments ws) nil)
     (values out (or (websocket-frag-opcode ws) +binary+))))
 
-(defun receive-text (ws)
-  "Next message as a string, or NIL at close."
-  (multiple-value-bind (payload opcode) (receive ws)
-    (when payload
-      (if (= opcode +binary+) payload (from-utf8 payload)))))
+(defun pending-p (ws)
+  "True when RECEIVE on WS has input to work on now: bytes buffered in its stream,
+or its socket readable.  For ONE thread driving several sockets by readiness
+(cl-nostr's relay pump on modus).  RECEIVE may still wait for the rest of a frame
+that is only partly here -- up to the TLS transport's timeout on wss://."
+  (let ((s (websocket-stream ws)))
+    (if (typep s 'seal:tls-stream)
+        (seal:tls-stream-pending-p s)
+        (and (listen s) t))))
+
+(defun receive-text (ws &key (wait t))
+  "Next message as a string, or NIL at close.  With :WAIT NIL, (values NIL
+:PENDING) when no message is ready (see RECEIVE)."
+  (multiple-value-bind (payload opcode) (receive ws :wait wait)
+    (cond ((null payload) (values nil opcode))
+          ((= opcode +binary+) payload)
+          (t (from-utf8 payload)))))
+
+;;; Clients that drive sockets from one thread by readiness (PENDING-P, :WAIT NIL)
+;;; ask #+seal-readiness, so they still load against an older seal.
+(pushnew :seal-readiness *features*)

@@ -93,4 +93,9 @@
    own.  That is a real loss (a silent peer is waited for indefinitely rather than abandoned),
    and it is stated here rather than hidden: the fix is to give that implementation a branch."
   #+sbcl (sb-sys:wait-until-fd-usable fd :input timeout)
-  #-sbcl (progn fd timeout t))
+  ;; modus implements SB-SYS:WAIT-UNTIL-FD-USABLE on poll(2) in its SBCL compatibility
+  ;; surface.  Found at run time, not read time: an image started without that surface
+  ;; has no SB-SYS package, and then this degrades to the honest T below.
+  #+modus (let ((f (and (find-package "SB-SYS") (find-symbol "WAIT-UNTIL-FD-USABLE" "SB-SYS"))))
+            (if f (funcall f fd :input timeout) (progn fd timeout t)))
+  #-(or sbcl modus) (progn fd timeout t))

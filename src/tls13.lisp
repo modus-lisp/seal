@@ -469,6 +469,20 @@
         ((or (null b) (zerop (length b))) a)
         (t (concatenate 'vector a b))))
 
+(defun input-pending-p (conn)
+  "True when TLS-RECV has something to work on without waiting: a complete record
+is already buffered, or the socket is readable right now.  A transport with no
+descriptor answers T (it cannot be asked).  For a caller that drives several
+connections from ONE thread by readiness, as cl-nostr's relay pump does on modus,
+where a connection's state may only be touched by the thread that owns it.  It is
+not a promise that the read will not block at all: a record still arriving, or a
+post-handshake message with no application data behind it, waits -- up to the
+transport's TIMEOUT."
+  (let ((buf (tls-recv-buffer conn)))
+    (or (and buf (>= (length buf) 5) (>= (length buf) (+ 5 (bytes-u16 buf 3))))
+        (let ((fd (transport-fd (tls-transport conn))))
+          (if fd (and (wait-readable fd 0) t) t)))))
+
 (defun extract-record (buffer)
   "Return (values record remaining) or NIL if BUFFER holds no full record."
   (when (or (null buffer) (< (length buffer) 5)) (return-from extract-record nil))

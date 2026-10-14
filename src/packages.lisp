@@ -58,7 +58,7 @@
    ;; transport
    #:make-socket-transport #:make-stream-transport #:transport-send #:transport-recv #:transport-close
    ;; tls connection + public API
-   #:connect #:tls-send #:tls-recv #:tls-close #:*progress*
+   #:connect #:tls-send #:tls-recv #:tls-close #:*progress* #:input-pending-p
    #:tls-connection #:tls-connection-p
    #:tls-connection-cipher #:tls-connection-alpn
    #:tls-connection-peer-certificates
@@ -71,7 +71,7 @@
    #:dtls-peer-fingerprint #:dtls-peer-cert #:dtls-expected-peer-fingerprint
    #:dtls-export-keying-material          ; RFC 5705 exporter (DTLS-SRTP keys)
    ;; gray stream
-   #:tls-stream #:make-tls-stream #:tls-stream-connection
+   #:tls-stream #:make-tls-stream #:tls-stream-connection #:tls-stream-pending-p
    ;; conditions
    #:tls-error #:tls-alert #:tls-verify-error
    #:tls-certificate-error #:tls-certificate-untrusted-error

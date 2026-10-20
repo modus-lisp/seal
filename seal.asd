@@ -70,7 +70,7 @@ Separate from :seal for the same reason :seal/http is."
   :components ((:module "src" :serial t :components ((:file "websocket")))))
 
 (asdf:defsystem :seal/test
-  :depends-on ("seal")
+  :depends-on ("seal" "seal/http")
   :components
   ((:module "inspect"
     :serial t
@@ -80,6 +80,7 @@ Separate from :seal for the same reason :seal/http is."
      (:file "hpke")
      (:file "ehbp")
      (:file "negatives")
+     (:file "trust-store")
      (:file "tls12")
      (:file "live")
      (:file "self-test"))))

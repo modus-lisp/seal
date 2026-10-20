@@ -22,7 +22,8 @@
            #:response-body #:response-url
            #:request #:http-get #:get-string #:header
            #:parse-url #:url-scheme #:url-host #:url-port #:url-path
-           #:*user-agent* #:*max-redirects* #:*dial* #:http-error #:http-error-status
+           #:*user-agent* #:*max-redirects* #:*dial* #:*trust-store*
+           #:http-error #:http-error-status
            #:open-request #:body-stream #:body-stream-status #:body-stream-headers
            #:read-body-bytes))
 
@@ -130,6 +131,13 @@
      (let ((seal.http:*dial* (lambda (h p tm) (cl-transport:dial h p :transport :tor :timeout tm))))
        (seal.http:get-string \"https://example.com/\"))")
 
+(defvar *trust-store* :system
+  "The CA anchors every https request in this module verifies against: :system
+   (the OS bundle, the default), a seal TRUST-STORE, or a pathname/string naming a
+   PEM file -- anything seal:connect takes for :trust-store.  A program that must
+   trust a CA beyond the system bundle sets it, so the trust is visible where it
+   is made; nothing else in the module widens it.")
+
 (defun open-stream (url &key (timeout *timeout*))
   "A byte stream to URL's host: TLS for https, a plain socket for http.  TIMEOUT
    bounds each wait for the server, on both paths."
@@ -138,11 +146,13 @@
       (return-from open-stream
         (if (string= (url-scheme url) "https")
             (let ((conn (seal:connect (url-host url) (url-port url) :timeout timeout
+                                      :trust-store *trust-store*
                                       :transport (seal:make-stream-transport stream closer))))
               (values (seal:make-tls-stream conn) conn))
             (values stream nil)))))
   (if (string= (url-scheme url) "https")
-      (let ((conn (seal:connect (url-host url) (url-port url) :timeout timeout)))
+      (let ((conn (seal:connect (url-host url) (url-port url) :timeout timeout
+                                :trust-store *trust-store*)))
         (values (seal:make-tls-stream conn) conn))
       (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
                                  :type :stream :protocol :tcp)))

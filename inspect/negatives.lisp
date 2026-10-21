@@ -177,7 +177,39 @@ ygQlFSiiQMXi5vdKb2ZOh9Xe745nVhWA6Rg=
                    (lambda ()
                      (let ((int* (neg-cert *neg-int-pem*)))
                        (setf (certificate-ca-p int*) nil)
-                       (validate-chain (list leaf int*) store host)))))
+                       (validate-chain (list leaf int*) store host))))
+
+    ;; 7. Distrust: the pin of a key that is not listed must not disturb the good
+    ;;    chain (positive control for the distrust checks below).
+    (let ((*distrusted-spki-sha256* (list (spki-pin (spki-raw (certificate-spki int))))))
+      (let ((other (copy-seq (spki-pin (spki-raw (certificate-spki root))))))
+        (setf (char other 0) (if (char= (char other 0) #\0) #\1 #\0))
+        (handler-case
+            (let ((*distrusted-spki-sha256* (list other)))
+              (validate-chain (list leaf int) store host)
+              (incf *pass*) (format t "  PASS (control) unlisted pin does not disturb the chain~%"))
+          (error (e) (incf *fail*)
+            (format t "  FAIL (control) unlisted pin rejected the good chain: ~a~%" e)))))
+
+    ;; 8. A trusted root whose key is distrusted must not anchor a chain, even
+    ;;    though the store holds it.  The pin is given upper-case with colons on
+    ;;    purpose: matching must not depend on its spelling.
+    (expect-reject "distrusted root rejected even though the store holds it"
+                   'tls-certificate-untrusted-error
+                   (lambda ()
+                     (let* ((hex (spki-pin (spki-raw (certificate-spki root))))
+                            (pin (format nil "~{~:@(~a~)~^:~}"
+                                         (loop for i from 0 below (length hex) by 2
+                                               collect (subseq hex i (+ i 2))))))
+                       (let ((*distrusted-spki-sha256* (list pin)))
+                         (validate-chain (list leaf int) store host)))))
+
+    ;; 9. A distrusted INTERMEDIATE fails the chain even with its root trusted.
+    (expect-reject "distrusted intermediate rejected"
+                   'tls-certificate-untrusted-error
+                   (lambda ()
+                     (let ((*distrusted-spki-sha256* (list (spki-pin (spki-raw (certificate-spki int))))))
+                       (validate-chain (list leaf int) store host)))))
 
   (format t "==== negative cases: ~d passed, ~d failed ====~%" *pass* *fail*)
   *fail*)

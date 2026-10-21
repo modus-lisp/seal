@@ -159,7 +159,19 @@ The trust anchors come from `:trust-store`:
 - a pathname/string — a bundled or one-off PEM file of trusted roots.
 - a `trust-store` object — build one with `make-trust-store-from-pem`.
 
+**Distrust.** `*distrusted-spki-sha256*` lists SHA-256 pins of SubjectPublicKeyInfo
+DER for keys that must be refused even when a trust store holds them. It ships with
+the eight eMudhra intermediate keys disclosed as compromised on 2026-10-20 (see the
+comment in `src/verify.lisp`). A root that
+has been compromised stays in the OS bundle until the package is updated; pinning
+its key here cuts it off immediately. A distrusted root never anchors a chain, and
+a distrusted certificate anywhere in a chain fails the chain (so a compromised
+intermediate is caught too). Pins are matched case-insensitively and ignore colons.
+Compute a pin with `(seal:spki-pin <spki-der>)`.
+
 ```lisp
+(setf seal:*distrusted-spki-sha256* '("3f2a…"))   ; the compromised key's pin
+
 (connect "example.com" 443)                         ; full validation, system roots
 (connect "internal.host" 443 :trust-store #p"my-ca.pem")
 (connect "localhost" 8443 :verify nil)              ; opt out (unauthenticated)

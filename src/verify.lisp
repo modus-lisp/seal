@@ -156,6 +156,45 @@
        (make-trust-store-from-pem text)))
     (t (error 'tls-certificate-error :message "invalid :trust-store"))))
 
+;;; ---- distrust ---------------------------------------------------------------
+
+(defparameter *distrusted-spki-sha256*
+  ;; The eight eMudhra intermediate CAs whose private keys were disclosed as
+  ;; compromised on 2026-10-20 (source: https://emudhra.we-have-a-problem.com,
+  ;; impacted-intermediates.json; each pin recomputed from the PEM it ships).  Each
+  ;; key is cross-signed under emSign Root TLS/CS CA - G3 and AAA Certificate
+  ;; Services, so one pin per key covers both chains.  The roots are NOT listed:
+  ;; the disclosure marks the intermediate keys compromised, not the roots, and
+  ;; the roots anchor far more legitimate certificates.
+  '("EBED6475C2C2D80FCB199F3FE8DD6E6B3CE60B77EB15D4E42C3DEC0C6F5B5105"   ; EM DV TLS CA - G3B
+    "43BFFA19D6EF651451F6841E019931E96F6F2EAEFF28AB4B6F1CE4576DE2717B"   ; EM OV TLS CA - G3B
+    "E0254C7FCDC265E2F0F8A428DABB75AB4AE039B4872D62F5EE57F0877D5A8A41"   ; EM EV TLS CA - G3B
+    "49DD353DC2B919A3770645117D0E60C16115E7D1BC259EEFE734B00EA434FE5F"   ; EM DV TLS CA - G3C
+    "63ECEFEE431D49523BC1136C4E72D0206A477086CAF606CD5CF025686C109CF8"   ; EM OV TLS CA - G3C
+    "5C0660A2B164910D8FF589C18E14552E9E0EC237DCEFE2CB736D41A4811F81A0"   ; EM EV TLS CA - G3C
+    "EC4FFA1AD0AC88081314B7AAFFEF6A91F97CD57291BB5BA686C5415F5EB4F6B6"   ; EM OV CS CA - G3B
+    "92C063D67E8F14DB71D288E11266FFDAF69CBF115F7BAB14F3BC2F68D25E0E30")  ; EM OV CS CA - G3C
+  "SHA-256 pins of SubjectPublicKeyInfo DER (hex; case and colons ignored) for keys
+   that must not be trusted, even where a trust store holds the certificate.  A
+   compromised root stays in the OS bundle until the package is updated; listing
+   its pin here refuses it at once.  A pin names the KEY, not the name, so a root
+   re-issued under the same key is refused too.  A distrusted certificate anywhere
+   in a chain fails the chain, and a distrusted root is never an anchor.")
+
+(defun spki-pin (spki-der)
+  "Lowercase hex SHA-256 of SPKI-DER: the form *DISTRUSTED-SPKI-SHA256* is matched in."
+  (format nil "~(~{~2,'0x~}~)" (coerce (sha256 spki-der) 'list)))
+
+(defun normalize-pin (pin)
+  (remove-if (lambda (c) (member c '(#\: #\Space)))
+             (string-downcase pin)))
+
+(defun distrusted-certificate-p (cert)
+  (and *distrusted-spki-sha256*
+       (let ((pin (spki-pin (spki-raw (certificate-spki cert)))))
+         (member pin (mapcar #'normalize-pin *distrusted-spki-sha256*)
+                 :test #'string=))))
+
 ;;; ---- signature verification ------------------------------------------------
 
 (defun parse-ecdsa-signature (bytes)
@@ -260,11 +299,13 @@ itself present in STORE (server sent the root), or if some root whose subject is
 TOP's issuer verifies TOP's signature."
   ;; 1. TOP itself is a trusted root (matched by identical SPKI + subject).
   (dolist (r (gethash (certificate-subject top) (trust-store-by-subject store)))
-    (when (equalp (spki-raw (certificate-spki r)) (spki-raw (certificate-spki top)))
+    (when (and (equalp (spki-raw (certificate-spki r)) (spki-raw (certificate-spki top)))
+               (not (distrusted-certificate-p r)))
       (return-from find-trust-anchor r)))
   ;; 2. A trusted root signed TOP.
   (dolist (r (gethash (certificate-issuer top) (trust-store-by-subject store)))
-    (when (verify-cert-signature top r)
+    (when (and (not (distrusted-certificate-p r))
+               (verify-cert-signature top r))
       (return-from find-trust-anchor r)))
   nil)
 
@@ -280,6 +321,12 @@ returns the ordered, verified chain on success."
         (error 'tls-certificate-hostname-error
                :message (format nil "no certificate name matches ~a" host))))
     (let ((chain (build-ordered-chain certs)))
+      ;; A distrusted key anywhere in the chain fails it, trust store or not.
+      (dolist (c chain)
+        (when (distrusted-certificate-p c)
+          (error 'tls-certificate-untrusted-error
+                 :message (format nil "certificate uses a distrusted key: ~a"
+                                  (certificate-subject c)))))
       ;; Every certificate must be within its validity window.
       (dolist (c chain) (check-validity c now))
       ;; Each link's signature must verify under its issuer's key, and every

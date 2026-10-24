@@ -83,12 +83,13 @@ GCM's bit order.  Returns (values THI TLO), each (simple-array (unsigned-byte 64
     (values thi tlo)))
 
 (defun gcm-ghash (h data)
-  "GHASH over DATA (a multiple of 16 bytes) with hash subkey H.
+  "GHASH over DATA (a multiple of 16 bytes) with hash subkey H.  On modus: %GCM-GHASH-32.
 Table-driven GF(2^128) multiply: per block, X = (Y ^ block); Y := X*H is
 evaluated by Horner over the 16 bytes of X, one 256-entry table lookup plus a
 multiply-by-alpha^8 (byte shift + reduction table) per byte."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array (unsigned-byte 8) (*)) data))
+  #+modus (return-from gcm-ghash (%gcm-ghash-32 h data))
   (multiple-value-bind (thi tlo) (%gcm-make-table h)
     (declare (type (simple-array (unsigned-byte 64) (256)) thi tlo))
     (let ((yhi 0) (ylo 0) (rem +gcm-rem8+) (len (length data)))
@@ -127,6 +128,82 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
         (dotimes (i 8) (setf (aref y i) (logand (ash yhi (* -8 (- 7 i))) #xff)))
         (dotimes (i 8) (setf (aref y (+ 8 i)) (logand (ash ylo (* -8 (- 7 i))) #xff)))
         y))))
+
+;;; ---- GHASH in 32-bit limbs, for a Lisp whose fixnums are narrower than 64 bits -------------
+;;; The table-driven GHASH above keeps the 128-bit accumulator in two (UNSIGNED-BYTE 64) halves,
+;;; free on SBCL and a BIGNUM per operation on modus, whose fixnums are 62 bits: measured on the
+;;; Pi Zero, GHASH was 262 ms of every 1100-byte DTLS record (AES-CTR 4 ms), which capped a WebRTC
+;;; data channel at ~4 KB/s.  The same algorithm on four 32-bit limbs (A3 most significant) stays
+;;; in fixnums everywhere.  GCM-GHASH uses it on modus.
+
+(defun %gcm-limbs-shr1 (a3 a2 a1 a0)
+  "The 128-bit value A3:A2:A1:A0 times alpha (one right shift with GCM's reduction)."
+  (let ((carry (logand a0 1)))
+    (values (logxor (ash a3 -1) (if (= carry 1) #xe1000000 0))
+            (logior (ash a2 -1) (ash (logand a3 1) 31))
+            (logior (ash a1 -1) (ash (logand a2 1) 31))
+            (logior (ash a0 -1) (ash (logand a1 1) 31)))))
+
+(defparameter +gcm-rem8-32+
+  ;; the top limb of r*alpha^8 for a byte r shifted out of the bottom: the reduction only ever
+  ;; reaches the most significant 32 bits
+  (let ((rem (make-array 256 :element-type '(unsigned-byte 32) :initial-element 0)))
+    (dotimes (r 256 rem)
+      (multiple-value-bind (a3 a2 a1 a0) (values 0 0 0 r)
+        (dotimes (i 8) (multiple-value-setq (a3 a2 a1 a0) (%gcm-limbs-shr1 a3 a2 a1 a0)))
+        (setf (aref rem r) a3)))))
+
+(defun %gcm-make-table-32 (h)
+  "As %GCM-MAKE-TABLE, in limbs: (values T3 T2 T1 T0), 256 (UNSIGNED-BYTE 32) entries each."
+  (let ((t3 (make-array 256 :element-type '(unsigned-byte 32) :initial-element 0))
+        (t2 (make-array 256 :element-type '(unsigned-byte 32) :initial-element 0))
+        (t1 (make-array 256 :element-type '(unsigned-byte 32) :initial-element 0))
+        (t0 (make-array 256 :element-type '(unsigned-byte 32) :initial-element 0)))
+    (flet ((limb (k) (logior (ash (aref h k) 24) (ash (aref h (+ k 1)) 16)
+                             (ash (aref h (+ k 2)) 8) (aref h (+ k 3)))))
+      (let ((a3 (limb 0)) (a2 (limb 4)) (a1 (limb 8)) (a0 (limb 12)))
+        (dotimes (k 8)
+          (let ((idx (ash 128 (- k))))
+            (setf (aref t3 idx) a3 (aref t2 idx) a2 (aref t1 idx) a1 (aref t0 idx) a0))
+          (multiple-value-setq (a3 a2 a1 a0) (%gcm-limbs-shr1 a3 a2 a1 a0)))))
+    (loop for b from 1 below 256 do
+      (let ((lb (logand b (- b))))
+        (unless (= lb b)
+          (let ((rest (logxor b lb)))
+            (setf (aref t3 b) (logxor (aref t3 lb) (aref t3 rest))
+                  (aref t2 b) (logxor (aref t2 lb) (aref t2 rest))
+                  (aref t1 b) (logxor (aref t1 lb) (aref t1 rest))
+                  (aref t0 b) (logxor (aref t0 lb) (aref t0 rest)))))))
+    (values t3 t2 t1 t0)))
+
+(defun %gcm-ghash-32 (h data)
+  "GCM-GHASH on 32-bit limbs (see above): the same bytes, no bignums."
+  (multiple-value-bind (t3 t2 t1 t0) (%gcm-make-table-32 h)
+    (let ((y3 0) (y2 0) (y1 0) (y0 0) (rem +gcm-rem8-32+) (len (length data)))
+      (flet ((limb (k) (logior (ash (aref data k) 24) (ash (aref data (+ k 1)) 16)
+                               (ash (aref data (+ k 2)) 8) (aref data (+ k 3)))))
+        (do ((i 0 (+ i 16))) ((>= i len))
+          (setf y3 (logxor y3 (limb i)) y2 (logxor y2 (limb (+ i 4)))
+                y1 (logxor y1 (limb (+ i 8))) y0 (logxor y0 (limb (+ i 12))))
+          (let ((a3 0) (a2 0) (a1 0) (a0 0))
+            (loop for p from 15 downto 0 do
+              ;; acc := acc * alpha^8
+              (let ((r (logand a0 #xff)))
+                (setf a0 (logior (ash a0 -8) (ash (logand a1 #xff) 24))
+                      a1 (logior (ash a1 -8) (ash (logand a2 #xff) 24))
+                      a2 (logior (ash a2 -8) (ash (logand a3 #xff) 24))
+                      a3 (logxor (ash a3 -8) (aref rem r))))
+              ;; acc := acc xor T[byte p of X]
+              (let* ((w (case (ash p -2) (0 y3) (1 y2) (2 y1) (t y0)))
+                     (xp (logand (ash w (* -8 (- 3 (logand p 3)))) #xff)))
+                (setf a3 (logxor a3 (aref t3 xp)) a2 (logxor a2 (aref t2 xp))
+                      a1 (logxor a1 (aref t1 xp)) a0 (logxor a0 (aref t0 xp)))))
+            (setf y3 a3 y2 a2 y1 a1 y0 a0))))
+      (let ((y (make-array 16 :element-type '(unsigned-byte 8))) (ws (list y3 y2 y1 y0)))
+        (dotimes (k 4 y)
+          (let ((w (nth k ws)))
+            (dotimes (j 4)
+              (setf (aref y (+ (* 4 k) j)) (logand (ash w (* -8 (- 3 j))) #xff)))))))))
 
 (defun gcm-inc32 (counter)
   "Increment the low 32-bit counter of a 16-byte counter block, in place."

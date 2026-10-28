@@ -72,7 +72,15 @@
   (reasm (make-hash-table))
   (transcript (make-array 0 :element-type '(unsigned-byte 8)
                             :adjustable t :fill-pointer 0))
-  (done nil))
+  (done nil)
+  ;; the client handshake's own progress, so it can be driven a datagram at a time
+  ;; (DTLS-CLIENT-START / -INPUT / -RETRANSMIT) as well as by DTLS-CLIENT-HANDSHAKE
+  (hs-phase nil)                       ; :server-flight, :finished, :done
+  hs-ch                                ; the current ClientHello (gains a cookie on HVR)
+  hs-specs                             ; our second flight, for retransmission
+  hs-server-fin                        ; the server Finished we expect
+  (hs-tries 0) (hs-to 1.0)             ; misses so far; the current retransmit timer
+  (hs-timeout 1.0) (hs-max-timeout 8.0) (hs-max-retries 30))
 
 (defun dtls-next-msgseq (s)
   (prog1 (dtls-msg-seq s) (incf (dtls-msg-seq s))))
@@ -321,139 +329,178 @@ DTLS permits multiple records per datagram, and fewer packets means far less los
         (flush)))))
 
 ;;; ---- the client handshake --------------------------------------------------
+;;;
+;;; DRIVEN, NOT RUN.  The handshake is three entry points and no I/O of its own: START sends
+;;; the ClientHello, INPUT takes one datagram, RETRANSMIT is what to do when the timer fires,
+;;; and DTLS-CLIENT-TIMEOUT-SECONDS says when that is.  An event loop calls them from a socket
+;;; watch and a timer; DTLS-CLIENT-HANDSHAKE below is the same three in a blocking loop, for a
+;;; caller with a thread to spend.  The retransmission timer starts at TIMEOUT and doubles on
+;;; each miss up to MAX-TIMEOUT (RFC 6347 §4.2.4.1), resetting whenever a datagram arrives --
+;;; so a lossy link recovers in ~TIMEOUT rather than a fixed second per lost packet, while a
+;;; high-RTT link backs off instead of storming duplicates.
 
-(defun dtls-client-handshake (s recv-fn &key (timeout 1.0) (max-timeout 8.0) (max-retries 30))
-  "Drive the DTLS 1.2 client handshake to completion.  RECV-FN is called with a
-timeout (seconds) and returns the next inbound datagram or NIL on timeout.  The
-retransmission timer starts at TIMEOUT and doubles on each miss up to MAX-TIMEOUT
-(RFC 6347 §4.2.4.1), resetting whenever a flight arrives — so a lossy link recovers
-in ~TIMEOUT rather than a fixed second per lost packet, while a high-RTT link backs
-off instead of storming duplicates.  Returns S on success; signals TLS-ERROR otherwise."
+(defun %dtls-send-ch (s)
+  (funcall (dtls-send-fn s)
+           (dtls-record +content-handshake+ 0
+                        (prog1 (dtls-seq0 s) (incf (dtls-seq0 s))) (dtls-hs-ch s))))
+
+(defun dtls-client-start (s &key (timeout 1.0) (max-timeout 8.0) (max-retries 30))
+  "Begin the client handshake: send flight 1 (ClientHello).  Returns the seconds until the
+first retransmission is due."
   (setf (dtls-eph-priv s) (secure-random-bytes 32)
         (dtls-eph-pub s) (x25519-public-key (dtls-eph-priv s))
-        (dtls-client-random s) (secure-random-bytes 32))
-  (let ((cur-ch (dtls-build-client-hello s #()))       ; flight 1: ClientHello, no cookie
-        (server-done nil)
-        (tries 0)
-        (to timeout))                                  ; current retransmit timer (backs off)
-    (flet ((send-ch ()
-             (funcall (dtls-send-fn s)
-                      (dtls-record +content-handshake+ 0
-                                   (prog1 (dtls-seq0 s) (incf (dtls-seq0 s))) cur-ch))))
-      ;; ----- flights 1..3: ClientHello(/cookie) then the server flight -----
-      (send-ch)
-      (%dlog "~&[dtls] -> ClientHello (flight 1)~%")
-      (loop until server-done do
-        (let ((dg (funcall recv-fn to)))
-          (cond
-            ((null dg)
-             (incf tries)
-             (setf to (min max-timeout (* 2 to)))     ; exponential backoff
-             (%dlog "[dtls] recv timeout (try ~a, next ~,2fs), resending ClientHello~%" tries to)
-             (when (> tries max-retries)
-               (error 'tls-error :message "DTLS: timed out awaiting server flight"))
-             (send-ch))
-            (t
-             (setf to timeout)                        ; a flight arrived: reset the timer
-             (%dlog "[dtls] <- datagram ~a bytes, ~a record(s)~%"
-                    (length dg) (length (dtls-split-records dg)))
-             (dolist (rec (dtls-split-records dg))
-               (%dlog "[dtls]    record type=~a epoch=~a len=~a~%"
-                      (dtls-record-type rec) (dtls-record-epoch rec) (length rec))
-               (when (and (= (dtls-record-type rec) +content-alert+) (>= (length rec) 15))
-                 (%dlog "[dtls]    !! ALERT level=~a description=~a~%"
-                        (aref rec 13) (aref rec 14)))
-               (when (and (= (dtls-record-type rec) +content-handshake+)
-                          (= (dtls-record-epoch rec) 0))
-                 (dolist (frag (dtls-hs-fragments rec))
-                   (let ((msg (dtls-reassemble s frag)))
-                     (when msg
-                       (destructuring-bind (mtype mseq body) msg
-                         (%dlog "[dtls]    hs msg type=~a seq=~a len=~a~%"
-                                mtype mseq (length body))
-                         (cond
-                           ((= mtype +hs-hello-verify-request+)
-                            ;; cookie exchange: resend ClientHello WITH the cookie,
-                            ;; and (re)start the transcript at that ClientHello.
-                            (clrhash (dtls-reasm s))
-                            (setf cur-ch (dtls-build-client-hello s (dtls-parse-hvr body)))
-                            (send-ch))
-                           ((= mtype +hs-server-hello+)
-                            (dtls-reset-transcript s)
-                            (dtls-add-transcript s cur-ch)
-                            (dtls-add-transcript s (dtls-handshake +hs-server-hello+ mseq body))
-                            (dtls-parse-server-hello s body))
-                           ((= mtype +hs-certificate+)
-                            (dtls-parse-certificate s body)
-                            (dtls-add-transcript s (dtls-handshake mtype mseq body)))
-                           ((= mtype +hs-server-key-exchange+)
-                            (dtls-handle-ske s body)
-                            (dtls-add-transcript s (dtls-handshake mtype mseq body)))
-                           ((= mtype +hs-certificate-request+)
-                            (setf (dtls-cert-requested s) t)
-                            (dtls-add-transcript s (dtls-handshake mtype mseq body)))
-                           ((= mtype +hs-server-hello-done+)
-                            (dtls-add-transcript s (dtls-handshake mtype mseq body))
-                            (setf server-done t))
-                           (t nil)))))))))))))
-    ;; ----- fingerprint check (the actual WebRTC authentication) -----
-    (let ((exp (dtls-expected-peer-fingerprint s)))
-      (when (and exp (dtls-peer-fingerprint s)
-                 (not (string-equal exp (dtls-peer-fingerprint s))))
-        (warn "DTLS: peer certificate fingerprint ~a does not match SDP ~a"
-              (dtls-peer-fingerprint s) exp)))
-    (unless (dtls-server-eph-pub s)
-      (error 'tls-error :message "DTLS: no ServerKeyExchange (x25519) received"))
-    ;; ----- our flight: Certificate, ClientKeyExchange, CertificateVerify,
-    ;;       ChangeCipherSpec, Finished -----
-    (dtls-derive-keys s)
-    (let* ((cert-hs (when (dtls-cert-requested s)
-                      (dtls-handshake +hs-certificate+ (dtls-next-msgseq s)
-                                      (dtls-certificate-body (dtls-cert-der s)))))
-           (cke-hs (dtls-handshake +hs-client-key-exchange+ (dtls-next-msgseq s)
-                                   (%dcat (%db 32) (dtls-eph-pub s)))))
-      (when cert-hs (dtls-add-transcript s cert-hs))
-      (dtls-add-transcript s cke-hs)
-      (let* ((cv-hs (when (dtls-cert-requested s)
-                      (dtls-handshake +hs-certificate-verify+ (dtls-next-msgseq s)
-                                      (dtls-certificate-verify-body s)))))
-        (when cv-hs (dtls-add-transcript s cv-hs))
-        (let* ((fin-body (dtls-finished-data s "client finished"))
-               (fin-hs (dtls-handshake +hs-finished+ (dtls-next-msgseq s) fin-body))
-               (specs (append (when cert-hs (list (list :plain cert-hs)))
-                              (list (list :plain cke-hs))
-                              (when cv-hs (list (list :plain cv-hs)))
-                              (list (list :ccs) (list :enc fin-hs)))))
-          (dtls-add-transcript s fin-hs)           ; server Finished covers our Finished
-          (let ((expected-server-fin (dtls-finished-data s "server finished"))
-                (to timeout))                          ; flight-2 retransmit timer (backs off)
-            ;; ----- send our flight, await the server's CCS + Finished -----
-            (%dlog "[dtls] -> flight 2 (Cert/CKE/CertVerify/CCS/Finished) cipher=0x~4,'0x cert-req=~a~%"
-                   (or (dtls-cipher s) 0) (dtls-cert-requested s))
-            (dtls-transmit-flight s specs)
-            (setf tries 0)
-            (loop until (dtls-done s) do
-              (let ((dg (funcall recv-fn to)))
-                (cond
-                  ((null dg)
-                   (incf tries)
-                   (setf to (min max-timeout (* 2 to)))      ; exponential backoff
-                   (when (> tries max-retries)
-                     (error 'tls-error :message "DTLS: timed out awaiting server Finished"))
-                   (dtls-transmit-flight s specs))
-                  (t
-                   (setf to timeout)                         ; a flight arrived: reset the timer
-                   (dolist (rec (dtls-split-records dg))
-                     (when (and (= (dtls-record-type rec) +content-handshake+)
-                                (= (dtls-record-epoch rec) 1))
-                       (multiple-value-bind (type pt) (dtls-decrypt s rec)
-                         (declare (ignore type))
-                         (when (and pt (>= (length pt) 12)
-                                    (= (aref pt 0) +hs-finished+))
-                           (let ((got (subseq pt 12 (+ 12 (bytes-u24 pt 1)))))
-                             (unless (equalp got expected-server-fin)
-                               (error 'tls-error :message "DTLS: server Finished mismatch"))
-                             (setf (dtls-done s) t)))))))))))))))
+        (dtls-client-random s) (secure-random-bytes 32)
+        (dtls-hs-timeout s) timeout (dtls-hs-max-timeout s) max-timeout
+        (dtls-hs-max-retries s) max-retries
+        (dtls-hs-to s) timeout (dtls-hs-tries s) 0
+        (dtls-hs-ch s) (dtls-build-client-hello s #())   ; no cookie yet
+        (dtls-hs-phase s) :server-flight)
+  (%dtls-send-ch s)
+  (%dlog "~&[dtls] -> ClientHello (flight 1)~%")
+  (dtls-hs-to s))
+
+(defun dtls-client-timeout-seconds (s)
+  "Seconds the handshake waits for a datagram before DTLS-CLIENT-RETRANSMIT is due."
+  (dtls-hs-to s))
+
+(defun dtls-client-retransmit (s)
+  "The retransmission timer fired with nothing received: back off and resend the current
+flight.  Returns the next timeout; signals TLS-ERROR once MAX-RETRIES misses have passed."
+  (incf (dtls-hs-tries s))
+  (setf (dtls-hs-to s) (min (dtls-hs-max-timeout s) (* 2 (dtls-hs-to s))))
+  (ecase (dtls-hs-phase s)
+    (:server-flight
+     (%dlog "[dtls] recv timeout (try ~a, next ~,2fs), resending ClientHello~%"
+            (dtls-hs-tries s) (dtls-hs-to s))
+     (when (> (dtls-hs-tries s) (dtls-hs-max-retries s))
+       (error 'tls-error :message "DTLS: timed out awaiting server flight"))
+     (%dtls-send-ch s))
+    (:finished
+     (when (> (dtls-hs-tries s) (dtls-hs-max-retries s))
+       (error 'tls-error :message "DTLS: timed out awaiting server Finished"))
+     (dtls-transmit-flight s (dtls-hs-specs s)))
+    (:done nil))
+  (dtls-hs-to s))
+
+(defun %dtls-server-flight-record (s rec)
+  "File one record of the server's first flight.  T once ServerHelloDone has arrived."
+  (let ((done nil))
+    (%dlog "[dtls]    record type=~a epoch=~a len=~a~%"
+           (dtls-record-type rec) (dtls-record-epoch rec) (length rec))
+    (when (and (= (dtls-record-type rec) +content-alert+) (>= (length rec) 15))
+      (%dlog "[dtls]    !! ALERT level=~a description=~a~%" (aref rec 13) (aref rec 14)))
+    (when (and (= (dtls-record-type rec) +content-handshake+)
+               (= (dtls-record-epoch rec) 0))
+      (dolist (frag (dtls-hs-fragments rec))
+        (let ((msg (dtls-reassemble s frag)))
+          (when msg
+            (destructuring-bind (mtype mseq body) msg
+              (%dlog "[dtls]    hs msg type=~a seq=~a len=~a~%" mtype mseq (length body))
+              (cond
+                ((= mtype +hs-hello-verify-request+)
+                 ;; cookie exchange: resend ClientHello WITH the cookie,
+                 ;; and (re)start the transcript at that ClientHello.
+                 (clrhash (dtls-reasm s))
+                 (setf (dtls-hs-ch s) (dtls-build-client-hello s (dtls-parse-hvr body)))
+                 (%dtls-send-ch s))
+                ((= mtype +hs-server-hello+)
+                 (dtls-reset-transcript s)
+                 (dtls-add-transcript s (dtls-hs-ch s))
+                 (dtls-add-transcript s (dtls-handshake +hs-server-hello+ mseq body))
+                 (dtls-parse-server-hello s body))
+                ((= mtype +hs-certificate+)
+                 (dtls-parse-certificate s body)
+                 (dtls-add-transcript s (dtls-handshake mtype mseq body)))
+                ((= mtype +hs-server-key-exchange+)
+                 (dtls-handle-ske s body)
+                 (dtls-add-transcript s (dtls-handshake mtype mseq body)))
+                ((= mtype +hs-certificate-request+)
+                 (setf (dtls-cert-requested s) t)
+                 (dtls-add-transcript s (dtls-handshake mtype mseq body)))
+                ((= mtype +hs-server-hello-done+)
+                 (dtls-add-transcript s (dtls-handshake mtype mseq body))
+                 (setf done t))
+                (t nil)))))))
+    done))
+
+(defun %dtls-client-flight-2 (s)
+  "The server's first flight is complete: check it, derive keys, send ours (Certificate,
+ClientKeyExchange, CertificateVerify, ChangeCipherSpec, Finished)."
+  ;; ----- fingerprint check (the actual WebRTC authentication) -----
+  (let ((exp (dtls-expected-peer-fingerprint s)))
+    (when (and exp (dtls-peer-fingerprint s)
+               (not (string-equal exp (dtls-peer-fingerprint s))))
+      (warn "DTLS: peer certificate fingerprint ~a does not match SDP ~a"
+            (dtls-peer-fingerprint s) exp)))
+  (unless (dtls-server-eph-pub s)
+    (error 'tls-error :message "DTLS: no ServerKeyExchange (x25519) received"))
+  (dtls-derive-keys s)
+  (let* ((cert-hs (when (dtls-cert-requested s)
+                    (dtls-handshake +hs-certificate+ (dtls-next-msgseq s)
+                                    (dtls-certificate-body (dtls-cert-der s)))))
+         (cke-hs (dtls-handshake +hs-client-key-exchange+ (dtls-next-msgseq s)
+                                 (%dcat (%db 32) (dtls-eph-pub s)))))
+    (when cert-hs (dtls-add-transcript s cert-hs))
+    (dtls-add-transcript s cke-hs)
+    (let ((cv-hs (when (dtls-cert-requested s)
+                   (dtls-handshake +hs-certificate-verify+ (dtls-next-msgseq s)
+                                   (dtls-certificate-verify-body s)))))
+      (when cv-hs (dtls-add-transcript s cv-hs))
+      (let* ((fin-body (dtls-finished-data s "client finished"))
+             (fin-hs (dtls-handshake +hs-finished+ (dtls-next-msgseq s) fin-body)))
+        (dtls-add-transcript s fin-hs)           ; server Finished covers our Finished
+        (setf (dtls-hs-specs s) (append (when cert-hs (list (list :plain cert-hs)))
+                                        (list (list :plain cke-hs))
+                                        (when cv-hs (list (list :plain cv-hs)))
+                                        (list (list :ccs) (list :enc fin-hs)))
+              (dtls-hs-server-fin s) (dtls-finished-data s "server finished")
+              (dtls-hs-phase s) :finished
+              (dtls-hs-tries s) 0
+              (dtls-hs-to s) (dtls-hs-timeout s))
+        (%dlog "[dtls] -> flight 2 (Cert/CKE/CertVerify/CCS/Finished) cipher=0x~4,'0x cert-req=~a~%"
+               (or (dtls-cipher s) 0) (dtls-cert-requested s))
+        (dtls-transmit-flight s (dtls-hs-specs s))))))
+
+(defun %dtls-finished-record (s rec)
+  (when (and (= (dtls-record-type rec) +content-handshake+)
+             (= (dtls-record-epoch rec) 1))
+    (multiple-value-bind (type pt) (dtls-decrypt s rec)
+      (declare (ignore type))
+      (when (and pt (>= (length pt) 12) (= (aref pt 0) +hs-finished+))
+        (let ((got (subseq pt 12 (+ 12 (bytes-u24 pt 1)))))
+          (unless (equalp got (dtls-hs-server-fin s))
+            (error 'tls-error :message "DTLS: server Finished mismatch"))
+          (setf (dtls-done s) t
+                (dtls-hs-phase s) :done))))))
+
+(defun dtls-client-input (s dg)
+  "Feed one inbound datagram to the client handshake.  Returns T once it is complete; signals
+TLS-ERROR on a bad server flight.  Resets the retransmission timer (a datagram arrived)."
+  (setf (dtls-hs-to s) (dtls-hs-timeout s))
+  (ecase (dtls-hs-phase s)
+    (:server-flight
+     (%dlog "[dtls] <- datagram ~a bytes, ~a record(s)~%" (length dg) (length (dtls-split-records dg)))
+     (let ((done nil))
+       (dolist (rec (dtls-split-records dg))
+         (when (%dtls-server-flight-record s rec) (setq done t)))
+       (when done (%dtls-client-flight-2 s))))
+    (:finished
+     (dolist (rec (dtls-split-records dg))
+       (unless (dtls-done s) (%dtls-finished-record s rec))))
+    (:done nil))
+  (dtls-done s))
+
+(defun dtls-client-handshake (s recv-fn &key (timeout 1.0) (max-timeout 8.0) (max-retries 30))
+  "Drive the DTLS 1.2 client handshake to completion on this thread.  RECV-FN is called with a
+timeout (seconds) and returns the next inbound datagram or NIL on timeout.  Returns S on
+success; signals TLS-ERROR otherwise.  The same handshake as DTLS-CLIENT-START / -INPUT /
+-RETRANSMIT, which an event loop drives instead."
+  (dtls-client-start s :timeout timeout :max-timeout max-timeout :max-retries max-retries)
+  (loop until (dtls-done s) do
+    (let ((dg (funcall recv-fn (dtls-client-timeout-seconds s))))
+      (if dg
+          (dtls-client-input s dg)
+          (dtls-client-retransmit s))))
   s)
 
 ;;; ---- application data (for the SCTP layer that sits on top) ----------------

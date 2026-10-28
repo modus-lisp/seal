@@ -223,3 +223,15 @@
           (b1 (setf acc (ecm-add-affine f acc x1 y1)))
           (b2 (setf acc (ecm-add-affine f acc x2 y2))))))
     (ecm-to-affine f acc)))
+
+(defun ec-scalar-mult-fast (curve k pt)
+  "EC-SCALAR-MULT on fixnum limbs: the same left-to-right double-and-add and mixed adds, one
+inversion at the end.  Signing and key generation go through here, not only verification."
+  (let* ((f (%ecm-field-for (ec-p curve)))
+         (ax (ecm-to f (car pt))) (ay (ecm-to f (cdr pt)))
+         (acc (vector (ecm-one f) (ecm-one f) (make-array (ecm-n f) :initial-element 0))))
+    (loop for i from (1- (integer-length k)) downto 0 do
+      (setf acc (ecm-double f acc))
+      (when (logbitp i k)
+        (setf acc (ecm-add-affine f acc ax ay))))
+    (ecm-to-affine f acc)))

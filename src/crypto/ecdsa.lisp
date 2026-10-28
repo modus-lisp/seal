@@ -116,8 +116,11 @@ EFD madd-2007-bl). AX/AY are assumed to lie on the curve and to be non-infinite.
 (defun ec-scalar-mult (curve k pt)
   "Compute k*PT, returning an affine point. Left-to-right double-and-add in
 Jacobian coordinates with a single final inversion."
-  (if (or (zerop k) (ec-infinity-p pt))
-      :infinity
+  (cond
+    ((or (zerop k) (ec-infinity-p pt)) :infinity)
+    ;; the fixnum-limb path where bignums are slow (ecmont.lisp); this one stays the reference
+    (*ec-fast-p* (funcall 'ec-scalar-mult-fast curve k pt))
+    (t
       (let* ((p (ec-p curve))
              (ax (car pt)) (ay (cdr pt))
              (acc (vector 0 1 0)))
@@ -125,7 +128,7 @@ Jacobian coordinates with a single final inversion."
           (setf acc (jac-double p acc))
           (when (logbitp i k)
             (setf acc (jac-add-affine p acc ax ay))))
-        (jac-to-affine p acc))))
+        (jac-to-affine p acc)))))
 
 (defun ec-double-scalar-mult (curve k1 pt1 k2 pt2)
   "Compute k1*PT1 + k2*PT2 as one affine point using Shamir's trick: a single

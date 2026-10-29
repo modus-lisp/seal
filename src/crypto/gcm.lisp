@@ -256,12 +256,13 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
   "AES counter-mode XOR of INPUT, starting from counter J0+1."
   (let ((out (make-array (length input) :element-type '(unsigned-byte 8)))
         (counter (make-array 16 :element-type '(unsigned-byte 8)))
+        (ks (make-array 16 :element-type '(unsigned-byte 8)))
         (in-len (length input)))
     (dotimes (i 16) (setf (aref counter i) (aref j0 i)))
     (do ((i 0 (+ i 16)))
         ((>= i in-len))
       (gcm-inc32 counter)
-      (let ((ks (aes-encrypt-block counter expanded-key rounds)))
+      (let ((ks (aes-encrypt-block counter expanded-key rounds ks)))  ; one keystream buffer
         (dotimes (j 16)
           (when (< (+ i j) in-len)
             (setf (aref out (+ i j)) (logxor (aref input (+ i j)) (aref ks j)))))))

@@ -154,8 +154,9 @@
       (setf a (aes-xtime a)))
     result))
 
-(defun aes-encrypt-block (block expanded-key &optional (rounds 10))
-  "Encrypt a 16-byte block with an expanded key. Returns a fresh 16-byte array.
+(defun aes-encrypt-block (block expanded-key &optional (rounds 10) into)
+  "Encrypt a 16-byte block with an expanded key. Returns a fresh 16-byte array, or INTO (a
+16-byte array) filled -- counter mode encrypts a block per 16 bytes of a record.
 Fast T-table (Rijndael 4-table) implementation: each of the (rounds-1) full
 rounds is 16 table lookups + XORs; the final round is 16 S-box lookups."
   (declare (optimize (speed 3) (safety 0)) (type fixnum rounds))
@@ -192,7 +193,7 @@ rounds is 16 table lookups + XORs; the final round is 16 S-box lookups."
             (declare (type (unsigned-byte 32) n0 n1 n2 n3))
             (setf s0 n0 s1 n1 s2 n2 s3 n3 koff (+ koff 16))))
         ;; Final round: SubBytes + ShiftRows + AddRoundKey (no MixColumns).
-        (let ((out (make-array 16 :element-type '(unsigned-byte 8)))
+        (let ((out (or into (make-array 16 :element-type '(unsigned-byte 8))))
               (r0 (logxor (logior (ash (aref sb (b0 s0)) 24) (ash (aref sb (b1 s1)) 16)
                                   (ash (aref sb (b2 s2)) 8) (aref sb (b3 s3))) (w ek koff)))
               (r1 (logxor (logior (ash (aref sb (b0 s1)) 24) (ash (aref sb (b1 s2)) 16)

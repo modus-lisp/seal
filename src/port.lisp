@@ -85,6 +85,10 @@
 
 ;;; ---- waiting for a socket ---------------------------------------------------------------
 
+;; The symbol, once found: a relay pump asks on every turn, and the lookup by name was most of
+;; what each turn cost on a Pi.  Not found stays NIL, so it is looked for again next time.
+#+modus (defvar *wait-until-fd-usable* nil)
+
 (defun wait-readable (fd timeout)
   "Block until FD has input or TIMEOUT seconds pass.  True if readable, NIL on timeout.
 
@@ -96,6 +100,8 @@
   ;; modus implements SB-SYS:WAIT-UNTIL-FD-USABLE on poll(2) in its SBCL compatibility
   ;; surface.  Found at run time, not read time: an image started without that surface
   ;; has no SB-SYS package, and then this degrades to the honest T below.
-  #+modus (let ((f (and (find-package "SB-SYS") (find-symbol "WAIT-UNTIL-FD-USABLE" "SB-SYS"))))
+  #+modus (let ((f (or *wait-until-fd-usable*
+                       (setf *wait-until-fd-usable*
+                             (and (find-package "SB-SYS") (find-symbol "WAIT-UNTIL-FD-USABLE" "SB-SYS"))))))
             (if f (funcall f fd :input timeout) (progn fd timeout t)))
   #-(or sbcl modus) (progn fd timeout t))

@@ -39,7 +39,13 @@
 (defun %db (&rest bs)
   (make-array (length bs) :element-type '(unsigned-byte 8) :initial-contents bs))
 (defun %dcat (&rest seqs)
-  (apply #'concatenate '(vector (unsigned-byte 8)) seqs))
+  "SEQS joined into one octet vector: sized once and filled with REPLACE -- not APPLY of
+   CONCATENATE, which was a third of what a DTLS record allocated on a Pi."
+  (let ((out (make-array (loop for s in seqs sum (length s)) :element-type '(unsigned-byte 8)))
+        (i 0))
+    (dolist (s seqs out)
+      (replace out s :start1 i)
+      (incf i (length s)))))
 (defun %d16 (n) (%db (ldb (byte 8 8) n) (ldb (byte 8 0) n)))
 (defun %d24 (n) (%db (ldb (byte 8 16) n) (ldb (byte 8 8) n) (ldb (byte 8 0) n)))
 (defun %d48 (n)

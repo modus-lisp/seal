@@ -82,15 +82,22 @@ GCM's bit order.  Returns (values THI TLO), each (simple-array (unsigned-byte 64
                   (aref tlo b) (logxor (aref tlo lb) (aref tlo rest)))))))
     (values thi tlo)))
 
-(defun gcm-ghash (h data)
+(defun %gcm-tables (h)
+  "The multiplication tables GCM-GHASH builds from H, as a list: built once per key by
+   %GCM-PREPARE-KEY rather than once per record."
+  #+modus (multiple-value-list (%gcm-make-table-32 h))
+  #-modus (multiple-value-list (%gcm-make-table h)))
+
+(defun gcm-ghash (h data &optional tables)
   "GHASH over DATA (a multiple of 16 bytes) with hash subkey H.  On modus: %GCM-GHASH-32.
+TABLES, if given, are (%GCM-TABLES H), so they are not rebuilt.
 Table-driven GF(2^128) multiply: per block, X = (Y ^ block); Y := X*H is
 evaluated by Horner over the 16 bytes of X, one 256-entry table lookup plus a
 multiply-by-alpha^8 (byte shift + reduction table) per byte."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array (unsigned-byte 8) (*)) data))
-  #+modus (return-from gcm-ghash (%gcm-ghash-32 h data))
-  (multiple-value-bind (thi tlo) (%gcm-make-table h)
+  #+modus (return-from gcm-ghash (%gcm-ghash-32 h data tables))
+  (multiple-value-bind (thi tlo) (if tables (values-list tables) (%gcm-make-table h))
     (declare (type (simple-array (unsigned-byte 64) (256)) thi tlo))
     (let ((yhi 0) (ylo 0) (rem +gcm-rem8+) (len (length data)))
       (declare (type (unsigned-byte 64) yhi ylo)
@@ -176,9 +183,9 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
                   (aref t0 b) (logxor (aref t0 lb) (aref t0 rest)))))))
     (values t3 t2 t1 t0)))
 
-(defun %gcm-ghash-32 (h data)
+(defun %gcm-ghash-32 (h data &optional tables)
   "GCM-GHASH on 32-bit limbs (see above): the same bytes, no bignums."
-  (multiple-value-bind (t3 t2 t1 t0) (%gcm-make-table-32 h)
+  (multiple-value-bind (t3 t2 t1 t0) (if tables (values-list tables) (%gcm-make-table-32 h))
     (let ((y3 0) (y2 0) (y1 0) (y0 0) (rem +gcm-rem8-32+) (len (length data)))
       (flet ((limb (k) (logior (ash (aref data k) 24) (ash (aref data (+ k 1)) 16)
                                (ash (aref data (+ k 2)) 8) (aref data (+ k 3)))))
@@ -261,49 +268,57 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
     out))
 
 ;;; Key-schedule cache: TLS/DTLS reuse the same key across many records, so
-;;; expanding it (and deriving the GHASH subkey H) once and reusing it avoids
-;;; that per-record cost.  The cache holds an immutable snapshot list so a read
-;;; always sees a consistent (key . expanded . rounds . H) tuple even under
-;;; concurrent writers.
+;;; expanding it (and deriving the GHASH subkey H and its tables) once and
+;;; reusing it avoids that per-record cost.  It holds the last few keys, not
+;;; one: a connection encrypts with one key and decrypts with another, so a
+;;; one-entry cache re-expanded the key -- and rebuilt 4 KB of GHASH tables --
+;;; on every record of a DTLS session that both sends and receives.  Each entry
+;;; is an immutable list, so a read always sees a consistent tuple.
+(defconstant +gcm-key-cache-size+ 4)
 (defvar *gcm-key-cache* nil
-  "Most recent (KEY-COPY EXPANDED ROUNDS H) tuple, or NIL.")
+  "The most recently used (KEY-COPY EXPANDED ROUNDS H TABLES) tuples, newest first.")
 #+modus ; per computation on modus: threads and actors share no state
 (let ((reg (find-symbol "REGISTER-PER-COMPUTATION-SPECIAL" "COMMON-LISP-USER")))
   (when (and reg (fboundp reg)) (funcall reg '*gcm-key-cache*)))
 
 (defun %gcm-prepare-key (key)
-  "Return (values EXPANDED ROUNDS H) for KEY, caching the last one used."
-  (let ((c *gcm-key-cache*))
-    (if (and c (equalp (the (simple-array (unsigned-byte 8) (*)) (first c)) key))
-        (values (second c) (third c) (fourth c))
+  "Return (values EXPANDED ROUNDS H TABLES) for KEY, from the cache of recent keys."
+  (let ((c (find key *gcm-key-cache*
+                 :test (lambda (k e) (equalp (the (simple-array (unsigned-byte 8) (*)) (first e)) k)))))
+    (if c
+        (values (second c) (third c) (fourth c) (fifth c))
         (let* ((key-len (length key))
                (expanded (if (= key-len 16) (aes-expand-key-128 key) (aes-expand-key-256 key)))
                (rounds (if (= key-len 16) 10 14))
                (h (aes-encrypt-block
                    (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)
-                   expanded rounds)))
-          (setf *gcm-key-cache* (list (copy-seq key) expanded rounds h))
-          (values expanded rounds h)))))
+                   expanded rounds))
+               (tables (%gcm-tables h))
+               (old *gcm-key-cache*))
+          (setf *gcm-key-cache*
+                (cons (list (copy-seq key) expanded rounds h tables)
+                      (subseq old 0 (min (length old) (1- +gcm-key-cache-size+)))))
+          (values expanded rounds h tables)))))
 
 (defun aes-gcm-encrypt (key nonce plaintext aad)
   "AES-GCM encrypt. KEY 16/32 bytes, NONCE 12 bytes. Returns (ciphertext . tag)."
-  (multiple-value-bind (expanded-key rounds h) (%gcm-prepare-key key)
+  (multiple-value-bind (expanded-key rounds h tables) (%gcm-prepare-key key)
    (let* ((j0 (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))
     (dotimes (i 12) (setf (aref j0 i) (aref nonce i)))
     (setf (aref j0 15) 1)
     (let* ((ciphertext (%gcm-ctr expanded-key rounds j0 plaintext))
-           (s (gcm-ghash h (%gcm-build-ghash-data aad ciphertext)))
+           (s (gcm-ghash h (%gcm-build-ghash-data aad ciphertext) tables))
            (j0-enc (aes-encrypt-block j0 expanded-key rounds)))
       (dotimes (i 16) (setf (aref s i) (logxor (aref s i) (aref j0-enc i))))
       (cons ciphertext s)))))
 
 (defun aes-gcm-decrypt (key nonce ciphertext aad tag)
   "AES-GCM decrypt. Returns plaintext, or NIL if the tag does not verify."
-  (multiple-value-bind (expanded-key rounds h) (%gcm-prepare-key key)
+  (multiple-value-bind (expanded-key rounds h tables) (%gcm-prepare-key key)
    (let* ((j0 (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))
     (dotimes (i 12) (setf (aref j0 i) (aref nonce i)))
     (setf (aref j0 15) 1)
-    (let* ((s (gcm-ghash h (%gcm-build-ghash-data aad ciphertext)))
+    (let* ((s (gcm-ghash h (%gcm-build-ghash-data aad ciphertext) tables))
            (j0-enc (aes-encrypt-block j0 expanded-key rounds))
            (diff 0))
       (dotimes (i 16) (setf (aref s i) (logxor (aref s i) (aref j0-enc i))))

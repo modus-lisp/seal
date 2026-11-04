@@ -59,6 +59,19 @@
   (check "SHA-1 abc" (sha1 (ascii "abc")) "a9993e364706816aba3e25717850c26c9cd0d89d")
   (check "SHA-1 empty" (sha1 (ascii "")) "da39a3ee5e6b4b0d3255bfef95601890afd80709")
 
+  (format t "~%== MD5 (RFC 1321) / HMAC-SHA1 (RFC 2202) ==~%")
+  (check "MD5 empty" (md5 (ascii "")) "d41d8cd98f00b204e9800998ecf8427e")
+  (check "MD5 abc" (md5 (ascii "abc")) "900150983cd24fb0d6963f7d28e17f72")
+  (check "MD5 80 digits"
+         (md5 (ascii "12345678901234567890123456789012345678901234567890123456789012345678901234567890"))
+         "57edf4a22be3c955ac49da2e2107b67a")
+  (check "HMAC-SHA1 case 2" (hmac-sha1 (ascii "Jefe") (ascii "what do ya want for nothing?"))
+         "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79")
+  (check "HMAC-SHA1 case 6 (80-byte key)"
+         (hmac-sha1 (make-array 80 :element-type '(unsigned-byte 8) :initial-element #xaa)
+                    (ascii "Test Using Larger Than Block-Size Key - Hash Key First"))
+         "aa4ae5e15272d00e95705637ce8a3b55ed402112")
+
   (format t "~%== SHA-2 (FIPS 180-4) ==~%")
   (check "SHA-256 empty" (sha256 (ascii ""))
          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")

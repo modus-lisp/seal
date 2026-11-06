@@ -25,7 +25,7 @@
            #:*user-agent* #:*max-redirects* #:*dial* #:*trust-store*
            #:http-error #:http-error-status
            #:open-request #:body-stream #:body-stream-status #:body-stream-headers
-           #:read-body-bytes))
+           #:read-body-bytes #:request-into #:open-body-reader))
 
 (in-package #:seal.http)
 
@@ -253,6 +253,102 @@
     (loop for b = (and (or (null max) (< (fill-pointer out) max)) (funcall next))
           while b do (vector-push-extend b out))
     (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
+;;; ---- the body in chunks ---------------------------------------------------------
+;;;
+;;; BODY-BYTE-READER hands the body over an octet at a time, which is right for headers and
+;;; text and wrong for a 20 MB download: every octet is a funcall and a generic READ-BYTE.
+;;; BODY-CHUNK-READER frames the same body (it is the same three framings) but moves it with
+;;; READ-SEQUENCE, a TLS record or a socket buffer at a time, into the caller's buffer.
+
+(defun body-chunk-reader (stream framing)
+  "A function (BUF START END) that reads the body's next octets into BUF[START..END) and
+   returns how many, 0 once the body is over.  It never reads past the body."
+  (let ((left 0) (done nil))
+    (flet ((take (buf start n)
+             (let ((got (- (read-sequence buf stream :start start :end (+ start n)) start)))
+               (values got (< got n)))))
+      (etypecase framing
+        ((member :none) (lambda (buf start end) (declare (ignore buf start end)) 0))
+        ((member :eof)
+         (lambda (buf start end)
+           (if done 0
+               (multiple-value-bind (got short) (take buf start (- end start))
+                 (when short (setf done t))
+                 got))))
+        (cons
+         (setf left (second framing))
+         (lambda (buf start end)
+           (if (zerop left) 0
+               (multiple-value-bind (got short) (take buf start (min left (- end start)))
+                 (when short (fail nil "short body (~d bytes missing)" (- left got)))
+                 (decf left got)
+                 got))))
+        ((member :chunked)
+         (lambda (buf start end)
+           (loop
+             (when done (return 0))
+             (when (plusp left)
+               (multiple-value-bind (got short) (take buf start (min left (- end start)))
+                 (when short (fail nil "chunked body cut off"))
+                 (decf left got)
+                 (when (zerop left) (crlf-line stream))       ; CRLF after each chunk
+                 (return got)))
+             (let* ((line (crlf-line stream))
+                    (semi (and line (position #\; line)))
+                    (size (or (and line (ignore-errors
+                                         (parse-integer line :end semi :radix 16)))
+                              (fail nil "bad chunk size ~s" line))))
+               (if (zerop size)
+                   (progn (loop for l = (crlf-line stream)    ; trailers
+                                while (and l (plusp (length l))))
+                          (setf done t))
+                   (setf left size))))))))))
+
+(defun open-body-reader (method url &key headers body (timeout *timeout*))
+  "Send METHOD to URL and read the status and headers.  Returns (values READ STATUS HEADERS
+   CLOSE): (READ BUF START END) reads the body's next octets into BUF[START..END) and returns
+   how many, 0 once the body is over; (CLOSE) closes the connection, and the caller must call
+   it however it leaves.  The body is never buffered here beyond what the transport holds, so
+   a caller can pull a body of any size through one buffer of its own.
+
+   Does not follow redirects, and the request BODY is sent from memory as with REQUEST."
+  (let* ((u (if (url-p url) url (parse-url url)))
+         (stream (open-stream u :timeout timeout))
+         (ok nil))
+    (unwind-protect
+         (progn
+           (send-head-and-body stream method u headers body)
+           (multiple-value-bind (code hdrs) (read-status-and-headers stream)
+             (multiple-value-prog1
+                 (values (body-chunk-reader stream (body-framing method code hdrs))
+                         code hdrs
+                         (lambda () (ignore-errors (close stream)) nil))
+               (setf ok t))))
+      (unless ok (ignore-errors (close stream))))))
+
+(defun request-into (method url sink &key headers body (timeout *timeout*)
+                                          (buffer-size 65536) buffer
+                                          (accept (lambda (code) (<= 200 code 299))))
+  "Send METHOD to URL and hand the response body to SINK as it arrives, never holding more of
+   it than one buffer: SINK is called as (SINK BUF START END) for each piece, and BUF is the
+   same vector every time (BUFFER, or a fresh BUFFER-SIZE octet vector), so SINK must use the
+   octets before it returns.  The body goes to SINK only when (ACCEPT STATUS) is true; otherwise
+   it is read and dropped.  Returns (values STATUS HEADERS OCTETS-TO-SINK).  OPEN-BODY-READER is
+   the same thing for a caller that wants to pull the body rather than be handed it."
+  (multiple-value-bind (read code hdrs close)
+      (open-body-reader method url :headers headers :body body :timeout timeout)
+    (unwind-protect
+         (let ((buf (or buffer (make-array buffer-size :element-type '(unsigned-byte 8))))
+               (keep (funcall accept code))
+               (total 0))
+           (loop for n = (funcall read buf 0 (length buf))
+                 while (plusp n)
+                 do (when keep
+                      (funcall sink buf 0 n)
+                      (incf total n)))
+           (values code hdrs total))
+      (funcall close))))
 
 (defun one-request (method url headers body &key (timeout *timeout*) max-body)
   (let ((stream (open-stream url :timeout timeout)))

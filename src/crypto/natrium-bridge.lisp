@@ -22,6 +22,19 @@
 (defun sha384 (message) (natrium:sha384 (%u8v message)))
 (defun sha512 (message) (natrium:sha512 (%u8v message)))
 
+;;; SHA-1 (legacy: TLS 1.0-1.1 constructs, the WebSocket handshake, git object ids).
+;;; seal's own streaming version moved into natrium, which now carries it.
+(defun sha1 (message) (natrium:sha1 (%u8v message)))
+(defun sha1-init () (natrium:sha1-init))
+(defun sha1-update (state src &optional (start 0) (end (length src)))
+  (natrium:sha1-update state src start end))
+(defun sha1-final (state) (natrium:sha1-final state))
+
+;;; MD5 and HMAC-SHA1: legacy too -- TURN's long-term credential key is
+;;; MD5(user:realm:password), STUN's MESSAGE-INTEGRITY is HMAC-SHA1 (RFC 8489).
+(defun md5 (message) (natrium:md5 (%u8v message)))
+(defun hmac-sha1 (key message) (natrium:hmac-sha1 (%u8v key) (%u8v message)))
+
 ;;; --- HMAC ----------------------------------------------------------------
 (defun hmac-sha256 (key message) (natrium:hmac-sha256 (%u8v key) (%u8v message)))
 (defun hmac-sha384 (key message) (natrium:hmac-sha384 (%u8v key) (%u8v message)))

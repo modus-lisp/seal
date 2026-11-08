@@ -200,15 +200,24 @@
                          (sb-bsd-sockets:socket-make-stream
                           sock :input t :output t :element-type '(unsigned-byte 8)
                           :buffering :full))))
-           (key (seal:base64-encode (seal:secure-random-bytes 16))))
-      (write-sequence (utf8 (handshake-request host path key
-                                               :port (unless (or (and securep (= port 443))
-                                                                 (and (not securep) (= port 80)))
-                                                       port)))
-                      stream)
-      (finish-output stream)
-      (read-handshake-response stream key)
-      (make-websocket :stream stream :host host))))
+           (key (seal:base64-encode (seal:secure-random-bytes 16)))
+           (ok nil))
+      ;; A REFUSED UPGRADE STILL HOLDS A SOCKET.  A relay behind a proxy that answers 502 (or
+      ;; anything but 101) used to leave this stream open for good -- the peer closes its end and
+      ;; the descriptor sits in CLOSE-WAIT -- and a caller that retries (a relay pool reconnecting
+      ;; every 20 s) leaked one descriptor per try.  Closed here, on every way out but success.
+      (unwind-protect
+           (progn
+             (write-sequence (utf8 (handshake-request host path key
+                                                      :port (unless (or (and securep (= port 443))
+                                                                        (and (not securep) (= port 80)))
+                                                              port)))
+                             stream)
+             (finish-output stream)
+             (read-handshake-response stream key)
+             (setf ok t)
+             (make-websocket :stream stream :host host))
+        (unless ok (ignore-errors (close stream :abort t)))))))
 
 ;;; ---- messages ----------------------------------------------------------------
 

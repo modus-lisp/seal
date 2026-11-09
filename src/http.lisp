@@ -102,10 +102,41 @@
 (defun ascii (bytes) (map 'string #'code-char bytes))
 (defun bytes (string) (seal:utf8-encode string))
 
+;;; THE CONNECTION'S BYTE I/O.  A TLS connection is a Gray stream, and on modus the CL entry points
+;;; (READ-BYTE, WRITE-SEQUENCE, FINISH-OUTPUT, READ-SEQUENCE) fail on one ("not of type LIST", in
+;;; the shim's wrapper), though the Gray generics it implements work.  So on modus a TLS stream is
+;;; driven through those generics; any other stream takes the CL function, as it always did.
+(defun %conn-read-byte (stream eof)
+  #+modus (if (typep stream 'seal::tls-stream)
+              (let ((b (gray-streams:stream-read-byte stream))) (if (eq b :eof) eof b))
+              (read-byte stream nil eof))
+  #-modus (read-byte stream nil eof))
+
+(defun %conn-write (stream octets)
+  #+modus (if (typep stream 'seal::tls-stream)
+              (gray-streams:stream-write-sequence stream octets 0 (length octets))
+              (write-sequence octets stream))
+  #-modus (write-sequence octets stream)
+  nil)
+
+(defun %conn-flush (stream)
+  #+modus (if (typep stream 'seal::tls-stream)
+              (gray-streams:stream-finish-output stream)
+              (finish-output stream))
+  #-modus (finish-output stream)
+  nil)
+
+(defun %conn-read (stream buf start end)
+  "READ-SEQUENCE's answer: the index just past the last octet read into BUF."
+  #+modus (if (typep stream 'seal::tls-stream)
+              (gray-streams:stream-read-sequence stream buf start end)
+              (read-sequence buf stream :start start :end end))
+  #-modus (read-sequence buf stream :start start :end end))
+
 (defun crlf-line (stream)
   "One CRLF-terminated line as a string, CRLF stripped; NIL at end of stream."
   (let ((out (make-array 64 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-    (loop for b = (read-byte stream nil :eof) do
+    (loop for b = (%conn-read-byte stream :eof) do
       (cond ((eq b :eof) (return (when (plusp (length out)) (ascii out))))
             ((= b 13))                                    ; CR: swallow
             ((= b 10) (return (ascii out)))                ; LF: end of line
@@ -183,9 +214,9 @@
                  (dolist (h req)
                    (format s "~a: ~a~c~c" (car h) (cdr h) #\Return #\Linefeed))
                  (format s "~c~c" #\Return #\Linefeed))))
-    (write-sequence (bytes head) stream)
-    (when body (write-sequence body stream))
-    (finish-output stream)))
+    (%conn-write stream (bytes head))
+    (when body (%conn-write stream body))
+    (%conn-flush stream)))
 
 (defun read-status-and-headers (stream)
   "The response's status code and header alist (names downcased)."
@@ -217,13 +248,13 @@
       ((member :none) (lambda () nil))
       ((member :eof)
        (lambda () (unless done
-                    (let ((b (read-byte stream nil nil)))
+                    (let ((b (%conn-read-byte stream nil)))
                       (unless b (setf done t))
                       b))))
       (cons
        (setf left (second framing))
        (lambda () (when (plusp left)
-                    (let ((b (read-byte stream nil nil)))
+                    (let ((b (%conn-read-byte stream nil)))
                       (if b (progn (decf left) b)
                           (fail nil "short body (~d bytes missing)" left))))))
       ((member :chunked)
@@ -231,7 +262,7 @@
          (loop
            (when done (return nil))
            (when (plusp left)
-             (let ((b (or (read-byte stream nil nil) (fail nil "chunked body cut off"))))
+             (let ((b (or (%conn-read-byte stream nil) (fail nil "chunked body cut off"))))
                (decf left)
                (when (zerop left) (crlf-line stream))       ; CRLF after each chunk
                (return b)))
@@ -266,7 +297,7 @@
    returns how many, 0 once the body is over.  It never reads past the body."
   (let ((left 0) (done nil))
     (flet ((take (buf start n)
-             (let ((got (- (read-sequence buf stream :start start :end (+ start n)) start)))
+             (let ((got (- (%conn-read stream buf start (+ start n)) start)))
                (values got (< got n)))))
       (etypecase framing
         ((member :none) (lambda (buf start end) (declare (ignore buf start end)) 0))

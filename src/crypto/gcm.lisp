@@ -184,33 +184,44 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
     (values t3 t2 t1 t0)))
 
 (defun %gcm-ghash-32 (h data &optional tables)
-  "GCM-GHASH on 32-bit limbs (see above): the same bytes, no bignums."
+  "GCM-GHASH on 32-bit limbs: the same bytes, no bignums.  Declared, and the 16 byte steps
+   of each block unrolled so every shift is a constant."
+  (declare (optimize (speed 3) (safety 0))
+           (type (simple-array (unsigned-byte 8) (*)) data))
   (multiple-value-bind (t3 t2 t1 t0) (if tables (values-list tables) (%gcm-make-table-32 h))
-    (let ((y3 0) (y2 0) (y1 0) (y0 0) (rem +gcm-rem8-32+) (len (length data)))
-      (flet ((limb (k) (logior (ash (aref data k) 24) (ash (aref data (+ k 1)) 16)
-                               (ash (aref data (+ k 2)) 8) (aref data (+ k 3)))))
-        (do ((i 0 (+ i 16))) ((>= i len))
-          (setf y3 (logxor y3 (limb i)) y2 (logxor y2 (limb (+ i 4)))
-                y1 (logxor y1 (limb (+ i 8))) y0 (logxor y0 (limb (+ i 12))))
+    (declare (type (simple-array (unsigned-byte 32) (256)) t3 t2 t1 t0))
+    (let ((y3 0) (y2 0) (y1 0) (y0 0) (rem +gcm-rem8-32+) (len (length data)) (i 0))
+      (declare (type (unsigned-byte 32) y3 y2 y1 y0) (type fixnum len i)
+               (type (simple-array (unsigned-byte 32) (256)) rem))
+      (macrolet ((limb (k) `(logior (ash (aref data (+ i ,k)) 24) (ash (aref data (+ i ,(+ k 1))) 16)
+                                    (ash (aref data (+ i ,(+ k 2))) 8) (aref data (+ i ,(+ k 3)))))
+                 (byte-step (w sh)
+                   ;; acc := acc * alpha^8, then acc ^= T[byte of W at SH]
+                   `(let ((r (logand a0 #xff)) (xp (logand (ash ,w ,(- sh)) #xff)))
+                      (declare (type (unsigned-byte 8) r xp))
+                      (setf a0 (logxor (logior (ash a0 -8) (ash (logand a1 #xff) 24)) (aref t0 xp))
+                            a1 (logxor (logior (ash a1 -8) (ash (logand a2 #xff) 24)) (aref t1 xp))
+                            a2 (logxor (logior (ash a2 -8) (ash (logand a3 #xff) 24)) (aref t2 xp))
+                            a3 (logxor (ash a3 -8) (aref rem r) (aref t3 xp))))))
+        (loop
+          (when (>= i len) (return))
+          (setf y3 (logxor y3 (limb 0)) y2 (logxor y2 (limb 4))
+                y1 (logxor y1 (limb 8)) y0 (logxor y0 (limb 12)))
           (let ((a3 0) (a2 0) (a1 0) (a0 0))
-            (loop for p from 15 downto 0 do
-              ;; acc := acc * alpha^8
-              (let ((r (logand a0 #xff)))
-                (setf a0 (logior (ash a0 -8) (ash (logand a1 #xff) 24))
-                      a1 (logior (ash a1 -8) (ash (logand a2 #xff) 24))
-                      a2 (logior (ash a2 -8) (ash (logand a3 #xff) 24))
-                      a3 (logxor (ash a3 -8) (aref rem r))))
-              ;; acc := acc xor T[byte p of X]
-              (let* ((w (case (ash p -2) (0 y3) (1 y2) (2 y1) (t y0)))
-                     (xp (logand (ash w (* -8 (- 3 (logand p 3)))) #xff)))
-                (setf a3 (logxor a3 (aref t3 xp)) a2 (logxor a2 (aref t2 xp))
-                      a1 (logxor a1 (aref t1 xp)) a0 (logxor a0 (aref t0 xp)))))
-            (setf y3 a3 y2 a2 y1 a1 y0 a0))))
-      (let ((y (make-array 16 :element-type '(unsigned-byte 8))) (ws (list y3 y2 y1 y0)))
-        (dotimes (k 4 y)
-          (let ((w (nth k ws)))
-            (dotimes (j 4)
-              (setf (aref y (+ (* 4 k) j)) (logand (ash w (* -8 (- 3 j))) #xff)))))))))
+            (declare (type (unsigned-byte 32) a3 a2 a1 a0))
+            (byte-step y0 0) (byte-step y0 8) (byte-step y0 16) (byte-step y0 24)
+            (byte-step y1 0) (byte-step y1 8) (byte-step y1 16) (byte-step y1 24)
+            (byte-step y2 0) (byte-step y2 8) (byte-step y2 16) (byte-step y2 24)
+            (byte-step y3 0) (byte-step y3 8) (byte-step y3 16) (byte-step y3 24)
+            (setf y3 a3 y2 a2 y1 a1 y0 a0))
+          (setf i (+ i 16))))
+      (let ((y (make-array 16 :element-type '(unsigned-byte 8))))
+        (macrolet ((put (k w) `(setf (aref y ,k) (logand (ash ,w -24) #xff)
+                                     (aref y ,(+ k 1)) (logand (ash ,w -16) #xff)
+                                     (aref y ,(+ k 2)) (logand (ash ,w -8) #xff)
+                                     (aref y ,(+ k 3)) (logand ,w #xff))))
+          (put 0 y3) (put 4 y2) (put 8 y1) (put 12 y0))
+        y))))
 
 (defun gcm-inc32 (counter)
   "Increment the low 32-bit counter of a 16-byte counter block, in place."
@@ -254,27 +265,33 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
 
 (defun %gcm-ctr (expanded-key rounds j0 input)
   "AES counter-mode XOR of INPUT, starting from counter J0+1."
-  (let ((out (make-array (length input) :element-type '(unsigned-byte 8)))
-        (counter (make-array 16 :element-type '(unsigned-byte 8)))
-        (ks (make-array 16 :element-type '(unsigned-byte 8)))
-        (in-len (length input)))
-    (dotimes (i 16) (setf (aref counter i) (aref j0 i)))
-    (do ((i 0 (+ i 16)))
-        ((>= i in-len))
+  (if (typep input '(simple-array (unsigned-byte 8) (*)))
+      (%gcm-ctr-octets expanded-key rounds j0 input)
+      (%gcm-ctr-octets expanded-key rounds j0 (coerce input '(simple-array (unsigned-byte 8) (*))))))
+
+(defun %gcm-ctr-octets (expanded-key rounds j0 input)
+  "%GCM-CTR of a simple octet vector: declared, one keystream block per 16 bytes."
+  (declare (optimize (speed 3) (safety 0)) (type fixnum rounds)
+           (type (simple-array (unsigned-byte 8) (*)) input j0))
+  (let* ((in-len (length input))
+         (out (make-array in-len :element-type '(unsigned-byte 8)))
+         (counter (make-array 16 :element-type '(unsigned-byte 8)))
+         (ks (make-array 16 :element-type '(unsigned-byte 8)))
+         (i 0))
+    (declare (type fixnum in-len i) (type (simple-array (unsigned-byte 8) (*)) out counter ks))
+    (replace counter j0 :end2 16)
+    (loop
+      (when (>= i in-len) (return))
       (gcm-inc32 counter)
-      (let ((ks (aes-encrypt-block counter expanded-key rounds ks)))  ; one keystream buffer
-        (dotimes (j 16)
-          (when (< (+ i j) in-len)
-            (setf (aref out (+ i j)) (logxor (aref input (+ i j)) (aref ks j)))))))
+      (aes-encrypt-block counter expanded-key rounds ks)
+      (let ((n (min 16 (- in-len i))) (j 0))
+        (declare (type fixnum n j))
+        (loop (when (>= j n) (return))
+          (setf (aref out (+ i j)) (logxor (aref input (+ i j)) (aref ks j)))
+          (setq j (+ j 1))))
+      (setq i (+ i 16)))
     out))
 
-;;; Key-schedule cache: TLS/DTLS reuse the same key across many records, so
-;;; expanding it (and deriving the GHASH subkey H and its tables) once and
-;;; reusing it avoids that per-record cost.  It holds the last few keys, not
-;;; one: a connection encrypts with one key and decrypts with another, so a
-;;; one-entry cache re-expanded the key -- and rebuilt 4 KB of GHASH tables --
-;;; on every record of a DTLS session that both sends and receives.  Each entry
-;;; is an immutable list, so a read always sees a consistent tuple.
 (defconstant +gcm-key-cache-size+ 4)
 (defvar *gcm-key-cache* nil
   "The most recently used (KEY-COPY EXPANDED ROUNDS H TABLES) tuples, newest first.")

@@ -96,6 +96,15 @@ evaluated by Horner over the 16 bytes of X, one 256-entry table lookup plus a
 multiply-by-alpha^8 (byte shift + reduction table) per byte."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array (unsigned-byte 8) (*)) data))
+  ;; modus: PCLMULQDQ where the runtime has it (it answers NIL where it does not), else the
+  ;; 32-bit-limb GHASH, which stays in fixnums
+  #+modus
+  (when (fboundp 'modus.runtime::%ghash-update)
+    (let ((state (make-array 48 :element-type '(unsigned-byte 8) :initial-element 0)))
+      (replace state h)
+      (dotimes (i 16) (setf (aref state (+ 32 i)) (- 15 i)))
+      (when (modus.runtime::%ghash-update state data (length data))
+        (return-from gcm-ghash (subseq state 16 32)))))
   #+modus (return-from gcm-ghash (%gcm-ghash-32 h data tables))
   (multiple-value-bind (thi tlo) (if tables (values-list tables) (%gcm-make-table h))
     (declare (type (simple-array (unsigned-byte 64) (256)) thi tlo))
@@ -265,9 +274,18 @@ multiply-by-alpha^8 (byte shift + reduction table) per byte."
 
 (defun %gcm-ctr (expanded-key rounds j0 input)
   "AES counter-mode XOR of INPUT, starting from counter J0+1."
-  (if (typep input '(simple-array (unsigned-byte 8) (*)))
-      (%gcm-ctr-octets expanded-key rounds j0 input)
-      (%gcm-ctr-octets expanded-key rounds j0 (coerce input '(simple-array (unsigned-byte 8) (*))))))
+  (let ((input (if (typep input '(simple-array (unsigned-byte 8) (*)))
+                   input
+                   (coerce input '(simple-array (unsigned-byte 8) (*))))))
+    ;; modus: AES-NI where the runtime has it (it answers NIL where it does not)
+    #+modus
+    (when (fboundp 'modus.runtime::%aes-ctr-xor)
+      (let ((out (make-array (length input) :element-type '(unsigned-byte 8))))
+        (when (modus.runtime::%aes-ctr-xor
+               (concatenate '(simple-array (unsigned-byte 8) (*)) j0 expanded-key)
+               input out (length input) rounds)
+          (return-from %gcm-ctr out))))
+    (%gcm-ctr-octets expanded-key rounds j0 input)))
 
 (defun %gcm-ctr-octets (expanded-key rounds j0 input)
   "%GCM-CTR of a simple octet vector: declared, one keystream block per 16 bytes."

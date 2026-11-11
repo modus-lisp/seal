@@ -76,12 +76,16 @@
     (when (zerop (length host)) (fail nil "no host in ~s" string))
     (%make-url :scheme scheme :host host :port port :path path)))
 
-(defun url-string (u)
-  (format nil "~a://~a~@[:~d~]~a" (url-scheme u) (url-host u)
+(defun url-authority (u)
+  "HOST, or HOST:PORT when the port is not the scheme's default (RFC 9110
+7.2: the Host header carries the port too)."
+  (format nil "~a~@[:~d~]" (url-host u)
           (unless (or (and (string= (url-scheme u) "https") (= (url-port u) 443))
                       (and (string= (url-scheme u) "http") (= (url-port u) 80)))
-            (url-port u))
-          (url-path u)))
+            (url-port u))))
+
+(defun url-string (u)
+  (format nil "~a://~a~a" (url-scheme u) (url-authority u) (url-path u)))
 
 (defun merge-location (base location)
   "Resolve a Location header against the URL it came from: absolute, or rooted,
@@ -198,7 +202,7 @@
 
 (defun send-head-and-body (stream method url headers body)
   "Write the request line, headers and BODY to STREAM."
-  (let* ((req (append (list (cons "Host" (url-host url))
+  (let* ((req (append (list (cons "Host" (url-authority url))
                             (cons "User-Agent" *user-agent*)
                             (cons "Accept" "*/*")
                             ;; We hand back bytes, not a decompressor.

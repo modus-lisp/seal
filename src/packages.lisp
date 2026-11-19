@@ -70,6 +70,8 @@
    #:make-dtls-session #:dtls-session #:dtls-session-p
    #:dtls-client-handshake #:dtls-send-app #:dtls-handle-datagram
    #:dtls-client-start #:dtls-client-input #:dtls-client-retransmit #:dtls-client-timeout-seconds
+   #:dtls-server-start #:dtls-server-input #:dtls-server-retransmit #:dtls-server-timeout-seconds
+   #:dtls-server-handshake #:dtls-role #:dtls-srtp-profile
    #:+sig-rsa-pkcs1-sha256+ #:+sig-ecdsa-secp256r1-sha256+
    #:dtls-fingerprint #:dtls-done #:dtls-cipher
    #:dtls-peer-fingerprint #:dtls-peer-cert #:dtls-expected-peer-fingerprint

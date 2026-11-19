@@ -39,6 +39,7 @@ no cl+ssl; platform dependency is SBCL's own sb-bsd-sockets."
      (:file "tls13")
      (:file "tls12")
      (:file "dtls")            ; DTLS 1.2 client (WebRTC) — reuses the tls12 schedule
+     (:file "dtls-server")     ; ...and the server role, for the WebRTC end that offers
      (:file "stream"))))
   :in-order-to ((asdf:test-op (asdf:test-op :seal/test))))
 

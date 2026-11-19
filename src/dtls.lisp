@@ -1,4 +1,5 @@
 ;;;; dtls.lisp — DTLS 1.2 client (RFC 6347), the datagram profile of TLS 1.2.
+;;;; (The SERVER role is dtls-server.lisp, on the same session and record layer.)
 ;;;;
 ;;;; seal already carries a complete TLS 1.2 client (tls12.lisp): the PRF, the
 ;;;; master-secret / key-block schedule, AES-128-GCM record protection, and the
@@ -86,7 +87,13 @@
   hs-specs                             ; our second flight, for retransmission
   hs-server-fin                        ; the server Finished we expect
   (hs-tries 0) (hs-to 1.0)             ; misses so far; the current retransmit timer
-  (hs-timeout 1.0) (hs-max-timeout 8.0) (hs-max-retries 30))
+  (hs-timeout 1.0) (hs-max-timeout 8.0) (hs-max-retries 30)
+  ;; which end of the handshake we are (dtls-server.lisp).  The key block is named for the
+  ;; CLIENT's and SERVER's write keys, so a server WRITES with the server key and READS with the
+  ;; client's -- DTLS-ENCRYPT / -DECRYPT ask this rather than assuming the client.
+  (role :client)
+  hs-ch-body                           ; server: the ClientHello body being answered
+  hs-srtp)                             ; server: the use_srtp profile chosen, or NIL
 
 (defun dtls-next-msgseq (s)
   (prog1 (dtls-msg-seq s) (incf (dtls-msg-seq s))))
@@ -125,11 +132,12 @@ the DER, upper-case colon-hex (AA:BB:...)."
 (defun dtls-encrypt (s type plaintext &key (epoch 1))
   (let* ((seq (dtls-seq1 s))
          (expl (%dcat (%d16 epoch) (%d48 seq)))
-         (nonce (%dcat (dtls-client-iv s) expl))
+         (server (eq (dtls-role s) :server))
+         (nonce (%dcat (if server (dtls-server-iv s) (dtls-client-iv s)) expl))
          (aad (%dcat (%d16 epoch) (%d48 seq)
                      (%db type +dtls-12-major+ +dtls-12-minor+)
                      (%d16 (length plaintext))))
-         (res (aes-gcm-encrypt (dtls-client-key s) nonce plaintext aad))
+         (res (aes-gcm-encrypt (if server (dtls-server-key s) (dtls-client-key s)) nonce plaintext aad))
          (fragment (%dcat expl (car res) (cdr res))))
     (incf (dtls-seq1 s))
     (dtls-record type epoch seq fragment)))
@@ -145,10 +153,12 @@ the DER, upper-case colon-hex (AA:BB:...)."
          (ctlen (- (length frag) 8 16))
          (ct (subseq frag 8 (+ 8 ctlen)))
          (tag (subseq frag (+ 8 ctlen)))
-         (nonce (%dcat (dtls-server-iv s) expl))
+         (server (eq (dtls-role s) :server))
+         (nonce (%dcat (if server (dtls-client-iv s) (dtls-server-iv s)) expl))
          (aad (%dcat (%d16 epoch) (%d48 seq)
                      (%db type +dtls-12-major+ +dtls-12-minor+) (%d16 ctlen))))
-    (values type (aes-gcm-decrypt (dtls-server-key s) nonce ct aad tag))))
+    (values type (aes-gcm-decrypt (if server (dtls-client-key s) (dtls-server-key s))
+                                  nonce ct aad tag))))
 
 ;;; ---- handshake framing + transcript ----------------------------------------
 

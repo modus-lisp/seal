@@ -385,6 +385,25 @@
            (values code hdrs total))
       (funcall close))))
 
+(defun read-body-chunked (read &optional max)
+  "The whole body from READ (a BODY-CHUNK-READER) as one octet vector, stopping after MAX octets
+   if given.  A TLS record or socket buffer at a time, each kept as its own piece and joined once
+   at the end: READ-BODY-BYTES's octet-at-a-time funcall and growing adjustable vector made a
+   megabyte body (a picture, base64 in JSON) cost seconds on the main thread and never finish on
+   a modus worker, whose own heap is small enough that every growth of the vector is a
+   collection that copies it."
+  (let ((buf (make-array 65536 :element-type '(unsigned-byte 8)))
+        (pieces '()) (total 0))
+    (loop for want = (if max (min (length buf) (- max total)) (length buf))
+          for n = (if (plusp want) (funcall read buf 0 want) 0)
+          while (plusp n)
+          do (push (subseq buf 0 n) pieces)
+             (incf total n))
+    (let ((out (make-array total :element-type '(unsigned-byte 8))) (at total))
+      (dolist (p pieces out)                    ; newest first: fill from the end
+        (decf at (length p))
+        (replace out p :start1 at)))))
+
 (defun one-request (method url headers body &key (timeout *timeout*) max-body)
   (let ((stream (open-stream url :timeout timeout)))
     (unwind-protect
@@ -392,9 +411,8 @@
            (send-head-and-body stream method url headers body)
            (multiple-value-bind (code hdrs) (read-status-and-headers stream)
              (make-response :status code :headers hdrs
-                            :body (read-body-bytes
-                                   (body-byte-reader stream
-                                                     (body-framing method code hdrs))
+                            :body (read-body-chunked
+                                   (body-chunk-reader stream (body-framing method code hdrs))
                                    max-body)
                             :url (url-string url))))
       (ignore-errors (close stream)))))

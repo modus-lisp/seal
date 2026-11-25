@@ -120,6 +120,37 @@
 (let ((reg (find-symbol "REGISTER-PER-COMPUTATION-SPECIAL" "COMMON-LISP-USER")))
   (when (and reg (fboundp reg)) (funcall reg '*system-trust-store-local*)))
 
+;;; WINDOWS HAS NO PEM BUNDLE: its roots are the ROOT certificate store, read here through
+;;; crypt32 (CertOpenSystemStoreW / CertEnumCertificatesInStore).  Only modus.exe can call
+;;; Windows from Lisp (MODUS-INT::W32-CALL*, modus's net/win32-api.lisp), so the functions
+;;; are found by name and anything else answers NIL.  A CERT_CONTEXT is
+;;; { u32 dwCertEncodingType; BYTE *pbCertEncoded @8; u32 cbCertEncoded @16; ... }.
+(defun %windows-root-ders ()
+  (let ((call (find-symbol "W32-CALL*" "MODUS-INT"))
+        (peek (find-symbol "W32-PEEK" "MODUS-INT")))
+    (when (and call peek (fboundp call) (fboundp peek))
+      (let ((h (funcall call :ptr "crypt32.dll!CertOpenSystemStoreW" 0 "ROOT"))
+            (ders '()) (ctx 0))
+        (unless (zerop h)
+          (unwind-protect
+               (loop
+                 (setq ctx (funcall call :ptr "crypt32.dll!CertEnumCertificatesInStore" h ctx))
+                 (when (zerop ctx) (return))
+                 (let* ((pb (funcall peek (+ ctx 8) :ptr))
+                        (cb (funcall peek (+ ctx 16) :u32))
+                        (der (make-array cb :element-type '(unsigned-byte 8))))
+                   (dotimes (i cb) (setf (aref der i) (funcall peek (+ pb i) :u8)))
+                   (push der ders)))
+            (funcall call :bool "crypt32.dll!CertCloseStore" h 0)))
+        (nreverse ders)))))
+
+(defun windows-root-trust-store ()
+  "A TRUST-STORE of Windows' ROOT certificates, or NIL when this is not modus on Windows."
+  (let ((ders (ignore-errors (%windows-root-ders))))
+    (when ders
+      (let ((store (make-trust-store)))
+        (dolist (der ders store) (trust-store-add store der))))))
+
 (defun %cached-store (cached path date)
   (and date cached (equal (first cached) path) (eql (second cached) date) (cddr cached)))
 
@@ -141,6 +172,13 @@
                 (unless (ignore-errors (setf *system-trust-store-cache* entry) t)
                   (setf *system-trust-store-local* entry))))
             (return-from load-system-trust-store store))))))
+  (let ((store (or (%cached-store *system-trust-store-cache* :windows :windows)
+                   (%cached-store *system-trust-store-local* :windows :windows)
+                   (windows-root-trust-store))))
+    (when store
+      (unless (ignore-errors (setf *system-trust-store-cache* (list* :windows :windows store)) t)
+        (setf *system-trust-store-local* (list* :windows :windows store)))
+      (return-from load-system-trust-store store)))
   (error 'tls-certificate-error
          :message "no system CA bundle found; supply :trust-store"))
 
